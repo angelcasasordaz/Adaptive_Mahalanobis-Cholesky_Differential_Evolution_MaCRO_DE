@@ -1,0 +1,17 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
+
+# Experiment outputs
+Results/
+Figures/
+
+# OS
+.DS_Store
+Thumbs.db
