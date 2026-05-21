@@ -12,6 +12,7 @@ __pycache__/
 # Experiment outputs
 Results/
 Figures/
+Methodology_Graphics/
 
 # OS
 .DS_Store
