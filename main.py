@@ -8,21 +8,15 @@ import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import lru_cache
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from mealpy import FloatVar
-from mealpy.swarm_based.PSO import OriginalPSO
-from mealpy.swarm_based.GWO import OriginalGWO
-from mealpy.swarm_based.WOA import OriginalWOA
-
-from mealpy.evolutionary_based.DE import (
-    OriginalDE,
-    JADE,
-    SADE,
-)
+import mealpy
+from mealpy import FloatVar, get_optimizer_by_name
 
 from dsade_optimizer import DSADE
+from macro_de_optimizer import MaCRO_DE
 
 AVAILABLE_BENCHMARKS = {
 
@@ -43,7 +37,8 @@ AVAILABLE_BENCHMARKS = {
 
 DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
-    "DSADE",
+    #"DSADE",
+    "MaCRO-DE",
     "OriginalPSO",
     "OriginalGWO",
     "OriginalWOA",
@@ -55,6 +50,7 @@ DEFAULT_OPTIMIZERS = [
 CHART_PALETTE = {
 
     "DSADE": "#3266ad",
+    "MaCRO-DE": "#3266ad",
     "OriginalPSO": "#9b59b6",
     "OriginalGWO": "#e06c00",
     "OriginalWOA": "#2a9d5c",
@@ -184,61 +180,125 @@ def build_optimizer(
     args,
 ):
 
-    if name.upper() == "DSADE":
-        return DSADE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-            beta_min=args.dsade_beta_min,
-            beta_max=args.dsade_beta_max,
-            pcr=args.dsade_pcr,
-            mahalanobis_q=args.dsade_mahal_q,
+    optimizer_key = normalize_optimizer_name(name)
+
+    if optimizer_key == "dsade":
+        optimizer_class = DSADE
+        optimizer_kwargs = custom_optimizer_kwargs(args)
+    elif optimizer_key == "macrode":
+        optimizer_class = MaCRO_DE
+        optimizer_kwargs = custom_optimizer_kwargs(args)
+    else:
+        optimizer_class = resolve_mealpy_optimizer(name)
+        optimizer_kwargs = {
+            "epoch": args.epochs,
+            "pop_size": args.pop_size,
+        }
+
+    return optimizer_class(**optimizer_kwargs)
+
+def normalize_optimizer_name(name):
+
+    return "".join(
+        char.lower()
+        for char in str(name)
+        if char.isalnum()
+    )
+
+def custom_optimizer_kwargs(args):
+
+    return {
+        "epoch": args.epochs,
+        "pop_size": args.pop_size,
+        "beta_min": args.dsade_beta_min,
+        "beta_max": args.dsade_beta_max,
+        "pcr": args.dsade_pcr,
+        "mahalanobis_q": args.dsade_mahal_q,
+    }
+
+@lru_cache(maxsize=None)
+def resolve_mealpy_optimizer(name):
+
+    optimizer_key = normalize_optimizer_name(name)
+
+    for module_name in mealpy_module_candidates(name):
+        optimizer_class = find_mealpy_optimizer_in_module(
+            module_name,
+            optimizer_key,
         )
+        if optimizer_class is not None:
+            return optimizer_class
 
-    if name.upper() == "ORIGINALPSO":
+    for module_name, obj in inspect.getmembers(mealpy):
+        if not inspect.ismodule(obj):
+            continue
 
-        return OriginalPSO(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
+        optimizer_class = find_mealpy_optimizer_in_module(
+            module_name,
+            optimizer_key,
         )
-
-    if name.upper() == "ORIGINALGWO":
-
-        return OriginalGWO(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-        )
-
-    if name.upper() == "ORIGINALWOA":
-
-        return OriginalWOA(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-        )
-
-    if name.upper() == "ORIGINALDE":
-
-        return OriginalDE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-        )
-
-    if name.upper() == "JADE":
-
-        return JADE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-        )
-
-    if name.upper() == "SADE":
-
-        return SADE(
-            epoch=args.epochs,
-            pop_size=args.pop_size,
-        )
+        if optimizer_class is not None:
+            return optimizer_class
 
     raise ValueError(
-        f"Unsupported optimizer: {name}"
+        f"Unknown Mealpy optimizer: {name}"
     )
+
+def mealpy_module_candidates(name):
+
+    raw_name = str(name).replace("-", "_")
+    compact_name = "".join(
+        char
+        for char in raw_name
+        if char.isalnum() or char == "_"
+    )
+    parts = [
+        part
+        for part in compact_name.split("_")
+        if part
+    ]
+
+    candidates = [
+        raw_name,
+        compact_name,
+    ]
+
+    for prefix in ("Original", "Dev", "Base"):
+        if compact_name.lower().startswith(prefix.lower()):
+            candidates.append(
+                compact_name[len(prefix):]
+            )
+
+    if parts:
+        candidates.append(parts[-1])
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+
+        normalized = candidate.upper()
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        yield normalized
+
+def find_mealpy_optimizer_in_module(
+    module_name,
+    optimizer_key,
+):
+
+    optimizers = get_optimizer_by_name(module_name)
+
+    for class_name, optimizer_class in optimizers.items():
+        if class_name == "Optimizer":
+            continue
+
+        if normalize_optimizer_name(class_name) == optimizer_key:
+            return optimizer_class
+
+    return None
 
 def build_problem(
     function_class,
