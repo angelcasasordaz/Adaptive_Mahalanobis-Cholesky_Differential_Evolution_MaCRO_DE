@@ -19,6 +19,9 @@ class MaCRO_DE(Optimizer):
         beta_max=0.8,
         pcr=0.2,
         mahalanobis_q=0.68,
+        progress_queue=None,
+        progress_interval=50,
+        progress_context=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -28,6 +31,9 @@ class MaCRO_DE(Optimizer):
         self.beta_max = self.validator.check_float("beta_max", beta_max, (0.0, 2.0))
         self.pcr = self.validator.check_float("pcr", pcr, (0.0, 1.0))
         self.mahalanobis_q = self.validator.check_float("mahalanobis_q", mahalanobis_q, (0.0, 1.0))
+        self.progress_queue = progress_queue
+        self.progress_interval = max(1, int(progress_interval))
+        self.progress_context = progress_context or {}
 
         if self.beta_min > self.beta_max:
             raise ValueError("beta_min debe ser <= beta_max.")
@@ -430,6 +436,21 @@ class MaCRO_DE(Optimizer):
         self.population_history.append(
             population_positions
         )
+
+        if (
+            self.progress_queue is not None
+            and (
+                epoch == 1
+                or epoch == self.epoch
+                or epoch % self.progress_interval == 0
+            )
+        ):
+            self.progress_queue.put({
+                **self.progress_context,
+                "epoch": epoch,
+                "total_epochs": self.epoch,
+                "best_fitness": float(self.g_best.target.fitness),
+            })
 
 
 # Backward compatibility aliases

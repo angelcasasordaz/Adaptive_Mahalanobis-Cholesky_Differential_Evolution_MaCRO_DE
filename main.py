@@ -18,6 +18,9 @@ from mealpy import FloatVar, get_optimizer_by_name
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
+DEFAULT_EPOCHS = 1000
+DEFAULT_RUNS = 2
+
 AVAILABLE_BENCHMARKS = {
 
     "CEC2005": "opfunu.cec_based.cec2005",
@@ -77,17 +80,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--functions", nargs="+", default=["ALL"], help="Functions to execute")
     parser.add_argument("--dims", type=int, default=30, help="Problem dimensions")
     parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="List of optimizers")
-    parser.add_argument("--epochs", type=int, default=20, help="Maximum optimization iterations")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Maximum optimization iterations")
     parser.add_argument("--pop-size", type=int, default=50, help="Population size")
-    parser.add_argument("--runs", type=int, default=2, help="Independent runs per optimizer")
+    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Independent runs per optimizer")
     parser.add_argument("--seed-base", type=int, default=1234, help="Base random seed")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Execute runs in parallel")
-    parser.add_argument("--n-workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument("--n-workers", type=int, default=None, help="Number of parallel workers")
     parser.add_argument("--dsade-beta-min", type=float, default=0.2, help="Minimum adaptive beta")
     parser.add_argument("--dsade-beta-max", type=float, default=0.8, help="Maximum adaptive beta")
     parser.add_argument("--dsade-pcr", type=float, default=0.2, help="Crossover probability")
     parser.add_argument("--dsade-mahal-q", type=float, default=0.68, help="Mahalanobis threshold")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.n_workers is None:
+        available_workers = max(1, (os.cpu_count() or 1) - 1)
+        args.n_workers = min(available_workers, max(1, args.runs))
+
+    return args
 
 def make_paths(args):
 
@@ -352,6 +361,7 @@ def run_single(
     seed,
 ):
 
+    logging.disable(logging.INFO)
     np.random.seed(seed)
     function_class = args.function_map[
         function_name

@@ -1,5 +1,5 @@
 # ============================================================
-# graphic_methodology_v2.py
+# graphic_methodology_v3.py
 # ============================================================
 
 import importlib
@@ -30,7 +30,7 @@ logging.disable(logging.INFO)
 # them for quick smoke tests without editing the file.
 # ============================================================
 
-DEFAULT_EXPERIMENT_ID = "EXP004"
+DEFAULT_EXPERIMENT_ID = "EXP005"
 DEFAULT_OUTPUT_FOLDER = "Methodology_Graphics"
 DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_DIMENSIONS = 30
@@ -136,7 +136,7 @@ def generate_ellipsoid(mean, covariance, q=0.68, resolution=40):
     return ellipsoid
 
 
-def plot_mahalanobis(function_name, population):
+def plot_mahalanobis(function_name, population, best_solution=None):
     if not PLOT_MAHALANOBIS or population.shape[1] < 3:
         return None
 
@@ -150,11 +150,22 @@ def plot_mahalanobis(function_name, population):
         population_3d[:, 2],
         c=distances,
         cmap="viridis",
+        vmin=float(np.min(distances)),
+        vmax=float(np.max(distances)),
         s=60,
         label="Population",
     )
     cbar = plt.colorbar(scatter)
-    cbar.set_label("Mahalanobis Distance")
+    cbar.set_label("Mahalanobis distance: close to far")
+    min_distance = float(np.min(distances))
+    max_distance = float(np.max(distances))
+    tick_values = np.linspace(min_distance, max_distance, 6)
+    tick_labels = [f"{tick:.2f}" for tick in tick_values]
+    if tick_labels:
+        tick_labels[0] = f"Closest {tick_labels[0]}"
+        tick_labels[-1] = f"Farthest {tick_labels[-1]}"
+        cbar.set_ticks(tick_values)
+        cbar.set_ticklabels(tick_labels)
 
     ellipsoid = generate_ellipsoid(mean, covariance, q=MAHALANOBIS_Q)
     ax.plot_surface(
@@ -165,7 +176,29 @@ def plot_mahalanobis(function_name, population):
         alpha=0.18,
         linewidth=0,
     )
-    ax.scatter(mean[0], mean[1], mean[2], c="red", s=120, marker="o", label="Mean")
+    ax.scatter(
+        mean[0],
+        mean[1],
+        mean[2],
+        c="red",
+        s=120,
+        marker="o",
+        label="Population mean",
+    )
+
+    if best_solution is not None:
+        best_solution_3d = np.asarray(best_solution, dtype=float)[:3]
+        ax.scatter(
+            best_solution_3d[0],
+            best_solution_3d[1],
+            best_solution_3d[2],
+            c="red",
+            edgecolors="red",
+            linewidths=0.8,
+            s=190,
+            marker="*",
+            label="x_best",
+        )
     ax.set_title(f"{function_name} - Iteration {EPOCHS}")
     ax.set_xlabel("X1")
     ax.set_ylabel("X2")
@@ -232,6 +265,7 @@ def run_single(function_name, function_class, run, progress_queue=None):
     return {
         "run": run,
         "best_fitness": float(g_best.target.fitness),
+        "best_solution": np.array(g_best.solution, dtype=float),
         "curve": curve,
         "last_population": last_population,
     }
@@ -331,14 +365,23 @@ def run_function(function_name, function_class):
 
     completed = sorted(completed, key=lambda item: item["run"])
     curves = [item["curve"] for item in completed]
-    last_population = completed[-1]["last_population"]
+    best_result = min(completed, key=lambda item: item["best_fitness"])
+    last_population = best_result["last_population"]
+    best_solution = best_result["best_solution"]
     mean_curve = np.mean(np.array(curves), axis=0)
     convergence_path = plot_convergence(function_name, mean_curve)
     if convergence_path is not None:
         print(f"Saved convergence: {convergence_path}", flush=True)
 
     if last_population is not None:
-        mahalanobis_path = plot_mahalanobis(function_name, last_population)
+        mean_3d = np.mean(last_population[:, :3], axis=0)
+        xbest_3d = best_solution[:3]
+        print(
+            f"Mean vs x_best distance (first 3 dimensions): "
+            f"{np.linalg.norm(mean_3d - xbest_3d):.6e}",
+            flush=True,
+        )
+        mahalanobis_path = plot_mahalanobis(function_name, last_population, best_solution)
         if mahalanobis_path is not None:
             print(f"Saved Mahalanobis: {mahalanobis_path}", flush=True)
 
