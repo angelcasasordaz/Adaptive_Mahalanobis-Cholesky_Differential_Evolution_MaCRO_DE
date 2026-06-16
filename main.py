@@ -18,8 +18,8 @@ from mealpy import FloatVar, get_optimizer_by_name
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 1000
-DEFAULT_RUNS = 2
+DEFAULT_EPOCHS = 2000
+DEFAULT_RUNS = 30
 
 AVAILABLE_BENCHMARKS = {
 
@@ -42,24 +42,39 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     "MaCRO-DE",
-    "OriginalPSO",
-    "OriginalGWO",
-    "OriginalWOA",
+    "OriginalBRO",
+    "DBO",
     "OriginalDE",
-    "JADE",
-    "SADE",
+    "OriginalDMOA",
+    "OriginalSHADE",
+    "OriginalGWO",
+    "OriginalMGO",
+    "OriginalPSO",
+    "OriginalWOA",
+    "OriginalHHO",
+    "OriginalMFO",
 ]
 
 CHART_PALETTE = {
-
     "DSADE": "#3266ad",
+    "DSADE_AWAD": "#d1495b",
     "MaCRO-DE": "#3266ad",
-    "OriginalPSO": "#9b59b6",
+    "DBO": "#00a6a6",
     "OriginalGWO": "#e06c00",
     "OriginalWOA": "#2a9d5c",
+    "OriginalCA": "#c44569",
+    "OriginalPSO": "#9b59b6",
     "OriginalDE": "#6a4c93",
     "JADE": "#2d6a4f",
     "SADE": "#f4a261",
+    "OriginalSHADE": "#264653",
+    "OriginalFOX": "#1b9aaa",
+    "OriginalRIME": "#e76f51",
+    "OriginalBRO": "#577590",
+    "OriginalDMOA": "#90be6d",
+    "OriginalMGO": "#f9844a",
+    "OriginalHHO": "#4d4d4d",
+    "OriginalGOA": "#8a5a44",
 }
 
 @dataclass
