@@ -35,7 +35,7 @@ DEFAULT_OUTPUT_FOLDER = "Methodology_Graphics"
 DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_DIMENSIONS = 30
 DEFAULT_POP_SIZE = 50
-DEFAULT_EPOCHS = 2000
+DEFAULT_EPOCHS = 5000
 DEFAULT_RUNS = 2
 DEFAULT_PROGRESS_INTERVAL = 25
 
@@ -205,7 +205,7 @@ def plot_mahalanobis(function_name, population, best_solution=None):
     ax.set_zlabel("X3")
     ax.legend()
     plt.tight_layout()
-    out_path = os.path.join(MAHALANOBIS_DIR, f"{function_name}.png")
+    out_path = os.path.join(MAHALANOBIS_DIR, f"{function_name}_{EPOCHS}.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     return out_path
@@ -222,7 +222,7 @@ def plot_convergence(function_name, mean_curve):
     plt.title(f"{function_name} Mean Convergence")
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    out_path = os.path.join(CONVERGENCE_DIR, f"{function_name}.png")
+    out_path = os.path.join(CONVERGENCE_DIR, f"{function_name}_{EPOCHS}.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     return out_path
