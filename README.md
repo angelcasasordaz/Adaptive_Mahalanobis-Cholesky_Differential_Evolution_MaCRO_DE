@@ -9,6 +9,9 @@ The novel methodology for improving the process of the Differential Evolution al
 
 By default, `main.py` now runs 1000 epochs and uses parallel workers based on the number of runs. Convergence plots are saved under `Figures/EXP###` and Excel summaries under `Results/EXP###`.
 
+To also save a scaled convergence plot, use `--convergence-extra-scale auto`.
+Available values are `none`, `auto`, `log`, `symlog`, and `exp`.
+
 For a smaller test run:
 
 ```powershell

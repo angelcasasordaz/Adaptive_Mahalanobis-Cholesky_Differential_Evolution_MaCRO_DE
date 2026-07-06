@@ -18,7 +18,7 @@ from mealpy import FloatVar, get_optimizer_by_name
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 2000
+DEFAULT_EPOCHS = 6000
 DEFAULT_RUNS = 30
 
 AVAILABLE_BENCHMARKS = {
@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=1, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=2, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Reuse cache if available")
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
@@ -101,6 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-base", type=int, default=1234, help="Base random seed")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Execute runs in parallel")
     parser.add_argument("--n-workers", type=int, default=None, help="Number of parallel workers")
+    parser.add_argument("--convergence-extra-scale", default="none", choices=["none", "auto", "log", "symlog", "exp"], help="Save an additional convergence plot with the selected y-axis scale or transformation")
     parser.add_argument("--dsade-beta-min", type=float, default=0.2, help="Minimum adaptive beta")
     parser.add_argument("--dsade-beta-max", type=float, default=0.8, help="Maximum adaptive beta")
     parser.add_argument("--dsade-pcr", type=float, default=0.2, help="Crossover probability")
@@ -228,6 +229,56 @@ def normalize_optimizer_name(name):
         for char in str(name)
         if char.isalnum()
     )
+
+def display_optimizer_name(name):
+
+    label = str(name)
+
+    for prefix in ("Original",):
+        if label.startswith(prefix):
+            return label[len(prefix):]
+
+    return label
+
+def resolve_convergence_scale(
+    curves_dict,
+    requested_scale,
+):
+
+    if requested_scale == "none":
+        return None
+
+    if requested_scale in ("symlog", "exp"):
+        return requested_scale
+
+    finite_values = []
+
+    for curve in curves_dict.values():
+        curve = np.asarray(
+            curve,
+            dtype=float,
+        )
+        finite_values.extend(
+            curve[np.isfinite(curve)]
+        )
+
+    if len(finite_values) == 0:
+        return None
+
+    min_value = np.min(finite_values)
+
+    if requested_scale == "auto":
+        return "log" if min_value > 0 else "symlog"
+
+    if requested_scale == "log" and min_value <= 0:
+        print(
+            "[CONVERGENCE SCALE] "
+            "log requires positive fitness values; "
+            "using symlog for this function."
+        )
+        return "symlog"
+
+    return requested_scale
 
 def custom_optimizer_kwargs(args):
 
@@ -426,37 +477,65 @@ def plot_convergence(
     curves_dict,
     title,
     out_path,
+    yscale="linear",
 ):
 
-    plt.figure(
+    fig, ax = plt.subplots(
         figsize=(10, 5),
         facecolor="white",
     )
 
     for optimizer_name, curve in curves_dict.items():
 
-        plt.plot(
+        curve = np.asarray(
             curve,
-            linewidth=2.2,
-            label=optimizer_name,
+            dtype=float,
+        )
+
+        if yscale == "exp":
+            plot_curve = np.where(
+                np.isfinite(curve),
+                np.exp(
+                    np.clip(
+                        curve,
+                        -745.0,
+                        709.0,
+                    )
+                ),
+                np.nan,
+            )
+        else:
+            plot_curve = curve
+
+        ax.plot(
+            plot_curve,
+            linewidth=2.8 if optimizer_name == "MaCRO-DE" else 2.2,
+            label=display_optimizer_name(
+                optimizer_name
+            ),
             color=CHART_PALETTE.get(
                 optimizer_name,
                 None,
             ),
         )
 
-    plt.xlabel("Iteration")
-    plt.ylabel("Fitness")
-    plt.title(title)
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(
+    if yscale in ("log", "symlog"):
+        ax.set_yscale(yscale)
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel(
+        "exp(Fitness)" if yscale == "exp" else "Fitness"
+    )
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(
         out_path,
         dpi=600,
     )
 
-    plt.close()
+    plt.close(fig)
 
 def export_results(
     results_struct,
@@ -552,6 +631,9 @@ def main():
     )
     print(
         f"Workers        : {args.n_workers}"
+    )
+    print(
+        f"Extra scale    : {args.convergence_extra_scale}"
     )
 
     results_struct = {}
@@ -724,6 +806,36 @@ def main():
                 f"Convergence Curve - {function_name}",
                 plot_path,
             )
+
+            extra_scale = resolve_convergence_scale(
+                curves_plot,
+                args.convergence_extra_scale,
+            )
+
+            if extra_scale is not None:
+                extra_plot_path = os.path.join(
+                    paths.fig_dir,
+                    (
+                        f"{paths.exp_tag}_{function_name}"
+                        f"_convergence_{extra_scale}.png"
+                    ),
+                )
+
+                scale_title = {
+                    "log": "Log Scale",
+                    "symlog": "Symmetric Log Scale",
+                    "exp": "Exponential Transform",
+                }[extra_scale]
+
+                plot_convergence(
+                    curves_plot,
+                    (
+                        f"Convergence Curve - "
+                        f"{function_name} ({scale_title})"
+                    ),
+                    extra_plot_path,
+                    yscale=extra_scale,
+                )
 
     excel_path = os.path.join(
         paths.res_dir,
