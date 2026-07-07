@@ -15,6 +15,7 @@ import pandas as pd
 import mealpy
 from mealpy import FloatVar, get_optimizer_by_name
 
+from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
@@ -42,17 +43,17 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     "MaCRO-DE",
-    "OriginalBRO",
+    "BRO",
     "DBO",
-    "OriginalDE",
-    "OriginalDMOA",
-    "OriginalSHADE",
-    "OriginalGWO",
-    "OriginalMGO",
-    "OriginalPSO",
-    "OriginalWOA",
-    "OriginalHHO",
-    "OriginalMFO",
+    "DE",
+    "DMO",
+    "GWO",
+    "HHO",
+    "MFO",
+    "MGO",
+    "PSO",
+    "SHADE",
+    "WOA",
 ]
 
 CHART_PALETTE = {
@@ -75,6 +76,20 @@ CHART_PALETTE = {
     "OriginalMGO": "#f9844a",
     "OriginalHHO": "#4d4d4d",
     "OriginalGOA": "#8a5a44",
+    "BRO": "#577590",
+    "DE": "#6a4c93",
+    "DMO": "#90be6d",
+    "GWO": "#e06c00",
+    "HHO": "#4d4d4d",
+    "MFO": "#8a5a44",
+    "MGO": "#f9844a",
+    "PSO": "#9b59b6",
+    "SHADE": "#264653",
+    "WOA": "#2a9d5c",
+}
+
+MEALPY_OPTIMIZER_ALIASES = {
+    "dmo": "DMOA",
 }
 
 @dataclass
@@ -213,6 +228,12 @@ def build_optimizer(
     elif optimizer_key == "macrode":
         optimizer_class = MaCRO_DE
         optimizer_kwargs = custom_optimizer_kwargs(args)
+    elif optimizer_key == "dbo":
+        optimizer_class = DBOOptimizer
+        optimizer_kwargs = {
+            "epoch": args.epochs,
+            "pop_size": args.pop_size,
+        }
     else:
         optimizer_class = resolve_mealpy_optimizer(name)
         optimizer_kwargs = {
@@ -295,11 +316,19 @@ def custom_optimizer_kwargs(args):
 def resolve_mealpy_optimizer(name):
 
     optimizer_key = normalize_optimizer_name(name)
+    resolved_name = MEALPY_OPTIMIZER_ALIASES.get(
+        optimizer_key,
+        name,
+    )
+    match_keys = {
+        optimizer_key,
+        normalize_optimizer_name(resolved_name),
+    }
 
-    for module_name in mealpy_module_candidates(name):
+    for module_name in mealpy_module_candidates(resolved_name):
         optimizer_class = find_mealpy_optimizer_in_module(
             module_name,
-            optimizer_key,
+            match_keys,
         )
         if optimizer_class is not None:
             return optimizer_class
@@ -310,7 +339,7 @@ def resolve_mealpy_optimizer(name):
 
         optimizer_class = find_mealpy_optimizer_in_module(
             module_name,
-            optimizer_key,
+            match_keys,
         )
         if optimizer_class is not None:
             return optimizer_class
@@ -361,17 +390,42 @@ def mealpy_module_candidates(name):
 
 def find_mealpy_optimizer_in_module(
     module_name,
-    optimizer_key,
+    optimizer_keys,
 ):
 
     optimizers = get_optimizer_by_name(module_name)
+    exact_match = None
+    original_match = None
+    prefixed_match = None
 
     for class_name, optimizer_class in optimizers.items():
         if class_name == "Optimizer":
             continue
 
-        if normalize_optimizer_name(class_name) == optimizer_key:
-            return optimizer_class
+        if normalize_optimizer_name(class_name) in optimizer_keys:
+            exact_match = optimizer_class
+            continue
+
+        for prefix in ("Original", "Dev", "Base"):
+            if class_name.startswith(prefix):
+                stripped_key = normalize_optimizer_name(
+                    class_name[len(prefix):]
+                )
+                if stripped_key not in optimizer_keys:
+                    continue
+                if prefix == "Original":
+                    original_match = optimizer_class
+                elif prefixed_match is None:
+                    prefixed_match = optimizer_class
+
+    if exact_match is not None:
+        return exact_match
+
+    if original_match is not None:
+        return original_match
+
+    if prefixed_match is not None:
+        return prefixed_match
 
     return None
 
