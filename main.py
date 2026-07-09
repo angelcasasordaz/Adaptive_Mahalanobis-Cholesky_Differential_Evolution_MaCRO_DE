@@ -19,7 +19,7 @@ from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 3000
+DEFAULT_EPOCHS = 6000
 DEFAULT_RUNS = 30
 
 AVAILABLE_BENCHMARKS = {
