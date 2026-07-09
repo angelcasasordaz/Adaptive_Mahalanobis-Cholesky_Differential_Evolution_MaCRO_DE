@@ -19,7 +19,7 @@ from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 6000
+DEFAULT_EPOCHS = 3000
 DEFAULT_RUNS = 30
 
 AVAILABLE_BENCHMARKS = {
@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=2, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=3, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Reuse cache if available")
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
