@@ -474,15 +474,40 @@ def build_cache_signature(args):
 
     ).hexdigest()[:10]
 
+def print_status(message):
+
+    print(
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}",
+        flush=True,
+    )
+
 def run_single(
     function_name,
     optimizer_name,
     args,
     seed,
+    run_index=None,
+    total_runs=None,
 ):
 
     logging.disable(logging.INFO)
     np.random.seed(seed)
+    run_label = (
+        f"run {run_index + 1}/{total_runs}"
+        if run_index is not None and total_runs is not None
+        else "run"
+    )
+    print_status(
+        "START | "
+        f"benchmark={args.benchmark} | "
+        f"function={function_name} | "
+        f"optimizer={optimizer_name} | "
+        f"{run_label} | "
+        f"dims={args.dims} | "
+        f"epochs={args.epochs} | "
+        f"pop={args.pop_size} | "
+        f"seed={seed}"
+    )
     function_class = args.function_map[
         function_name
     ]
@@ -504,6 +529,15 @@ def run_single(
         optimizer.history.list_global_best_fit,
         dtype=float,
     )
+    print_status(
+        "DONE  | "
+        f"benchmark={args.benchmark} | "
+        f"function={function_name} | "
+        f"optimizer={optimizer_name} | "
+        f"{run_label} | "
+        f"best={float(result.target.fitness):.6e} | "
+        f"time={runtime:.2f}s"
+    )
 
     return {
 
@@ -523,6 +557,8 @@ def run_parallel_task(task):
         task["optimizer_name"],
         task["args"],
         task["seed"],
+        task["run"],
+        task["total_runs"],
     )
 
     return task["run"], output
@@ -692,19 +728,29 @@ def main():
 
     results_struct = {}
 
-    for function_name in selected_functions:
+    for function_index, function_name in enumerate(
+        selected_functions,
+        start=1,
+    ):
         print("\n" + "=" * 60)
         print(
-            f"FUNCTION: {function_name}"
+            f"FUNCTION {function_index}/{len(selected_functions)}: "
+            f"{function_name}",
+            flush=True,
         )
         print("=" * 60)
         results_struct[function_name] = {}
         curves_plot = {}
-        for optimizer_name in args.optimizers:
+        for optimizer_index, optimizer_name in enumerate(
+            args.optimizers,
+            start=1,
+        ):
 
             try:
-                print(
-                    f"\nOptimizer: {optimizer_name}"
+                print_status(
+                    f"OPTIMIZER {optimizer_index}/{len(args.optimizers)} | "
+                    f"function={function_name} | "
+                    f"optimizer={optimizer_name}"
                 )
                 fitness_runs = []
                 runtime_runs = []
@@ -728,9 +774,15 @@ def main():
                             "optimizer_name": optimizer_name,
                             "args": args,
                             "seed": args.seed_base + run,
+                            "total_runs": args.runs,
                         })
 
                     completed = []
+                    print_status(
+                        f"SUBMITTED | function={function_name} | "
+                        f"optimizer={optimizer_name} | "
+                        f"runs={len(tasks)} | workers={args.n_workers}"
+                    )
 
                     with ProcessPoolExecutor(
                         max_workers=args.n_workers
@@ -750,6 +802,11 @@ def main():
                             completed.append(
                                 future.result()
                             )
+                            print_status(
+                                f"PROGRESS | function={function_name} | "
+                                f"optimizer={optimizer_name} | "
+                                f"completed_runs={len(completed)}/{len(tasks)}"
+                            )
 
                     completed = sorted(
                         completed,
@@ -764,6 +821,8 @@ def main():
                             optimizer_name,
                             args,
                             args.seed_base + run,
+                            run,
+                            args.runs,
                         )
 
                         completed.append(
