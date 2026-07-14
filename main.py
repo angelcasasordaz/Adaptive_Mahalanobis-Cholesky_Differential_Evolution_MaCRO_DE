@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import pickle
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -19,8 +20,8 @@ from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 6000
-DEFAULT_RUNS = 30
+DEFAULT_EPOCHS = 3000
+DEFAULT_RUNS = 20
 
 AVAILABLE_BENCHMARKS = {
 
@@ -103,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=3, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=4, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Reuse cache if available")
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
@@ -474,6 +475,131 @@ def build_cache_signature(args):
 
     ).hexdigest()[:10]
 
+def safe_path_component(value):
+
+    component = "".join(
+        char
+        if char.isalnum() or char in ("-", "_")
+        else "_"
+        for char in str(value)
+    )
+
+    return component or "item"
+
+def run_checkpoint_path(
+    paths,
+    cache_signature,
+    function_name,
+    optimizer_name,
+    run,
+):
+
+    optimizer_tag = (
+        f"{safe_path_component(optimizer_name)}_"
+        f"{hashlib.sha1(str(optimizer_name).encode('utf-8')).hexdigest()[:8]}"
+    )
+    checkpoint_dir = os.path.join(
+        paths.cache_dir,
+        cache_signature,
+        safe_path_component(function_name),
+        optimizer_tag,
+    )
+
+    return os.path.join(
+        checkpoint_dir,
+        f"run_{run + 1:03d}.pkl",
+    )
+
+def checkpoint_metadata(
+    args,
+    cache_signature,
+    function_name,
+    optimizer_name,
+    run,
+    seed,
+):
+
+    return {
+        "cache_signature": cache_signature,
+        "benchmark": args.benchmark,
+        "function_name": function_name,
+        "optimizer_name": optimizer_name,
+        "dims": args.dims,
+        "epochs": args.epochs,
+        "pop_size": args.pop_size,
+        "run": run,
+        "seed": seed,
+    }
+
+def save_run_checkpoint(
+    checkpoint_path,
+    metadata,
+    output,
+):
+
+    os.makedirs(
+        os.path.dirname(checkpoint_path),
+        exist_ok=True,
+    )
+    tmp_path = (
+        f"{checkpoint_path}.tmp."
+        f"{os.getpid()}."
+        f"{time.time_ns()}"
+    )
+
+    with open(tmp_path, "wb") as file:
+        pickle.dump(
+            {
+                "metadata": metadata,
+                "output": output,
+            },
+            file,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    os.replace(
+        tmp_path,
+        checkpoint_path,
+    )
+
+def load_run_checkpoint(
+    checkpoint_path,
+    expected_metadata,
+):
+
+    if not os.path.exists(checkpoint_path):
+        return None
+
+    try:
+        with open(checkpoint_path, "rb") as file:
+            payload = pickle.load(file)
+    except Exception as exc:
+        print_status(
+            f"CACHE INVALID | path={checkpoint_path} | reason={exc}"
+        )
+        return None
+
+    if payload.get("metadata") != expected_metadata:
+        print_status(
+            f"CACHE MISMATCH | path={checkpoint_path}"
+        )
+        return None
+
+    output = payload.get("output")
+    required_keys = {
+        "best_fitness",
+        "best_solution",
+        "runtime",
+        "curve",
+    }
+    if not isinstance(output, dict) or not required_keys.issubset(output):
+        print_status(
+            f"CACHE INVALID | path={checkpoint_path} | reason=missing keys"
+        )
+        return None
+
+    return output
+
 def print_status(message):
 
     print(
@@ -560,6 +686,11 @@ def run_parallel_task(task):
         task["run"],
         task["total_runs"],
     )
+    save_run_checkpoint(
+        task["checkpoint_path"],
+        task["metadata"],
+        output,
+    )
 
     return task["run"], output
 
@@ -575,7 +706,20 @@ def plot_convergence(
         facecolor="white",
     )
 
-    for optimizer_name, curve in curves_dict.items():
+    plot_items = [
+        item
+        for item in curves_dict.items()
+        if item[0] != "MaCRO-DE"
+    ]
+    if "MaCRO-DE" in curves_dict:
+        plot_items.append(
+            (
+                "MaCRO-DE",
+                curves_dict["MaCRO-DE"],
+            )
+        )
+
+    for optimizer_name, curve in plot_items:
 
         curve = np.asarray(
             curve,
@@ -594,19 +738,37 @@ def plot_convergence(
                 ),
                 np.nan,
             )
+        elif yscale == "log":
+            plot_curve = np.where(
+                np.isfinite(curve) & (curve > 0.0),
+                curve,
+                np.nan,
+            )
         else:
             plot_curve = curve
 
+        color = CHART_PALETTE.get(
+            optimizer_name,
+            None,
+        )
+
+        if optimizer_name == "MaCRO-DE":
+            ax.plot(
+                plot_curve,
+                linewidth=4.4,
+                label="_nolegend_",
+                color="black",
+                solid_capstyle="round",
+            )
+
         ax.plot(
             plot_curve,
-            linewidth=2.8 if optimizer_name == "MaCRO-DE" else 2.2,
+            linewidth=3.0 if optimizer_name == "MaCRO-DE" else 2.2,
             label=display_optimizer_name(
                 optimizer_name
             ),
-            color=CHART_PALETTE.get(
-                optimizer_name,
-                None,
-            ),
+            color=color,
+            solid_capstyle="round",
         )
 
     if yscale in ("log", "symlog"):
@@ -626,6 +788,22 @@ def plot_convergence(
     )
 
     plt.close(fig)
+
+def plot_log_convergence(
+    curves_dict,
+    function_name,
+    paths,
+):
+
+    plot_convergence(
+        curves_dict,
+        f"Convergence Curve - {function_name} (Log Scale)",
+        os.path.join(
+            paths.fig_dir,
+            f"{paths.exp_tag}_{function_name}_convergence_log.png",
+        ),
+        yscale="log",
+    )
 
 def export_results(
     results_struct,
@@ -725,6 +903,9 @@ def main():
     print(
         f"Extra scale    : {args.convergence_extra_scale}"
     )
+    print(
+        f"Cache signature: {cache_signature}"
+    )
 
     results_struct = {}
 
@@ -755,9 +936,57 @@ def main():
                 fitness_runs = []
                 runtime_runs = []
                 curves = []
-                pending_runs = list(
-                    range(args.runs)
-                )
+                completed = []
+                pending_runs = []
+                checkpoint_records = {}
+
+                for run in range(args.runs):
+                    seed = args.seed_base + run
+                    checkpoint_path = run_checkpoint_path(
+                        paths,
+                        cache_signature,
+                        function_name,
+                        optimizer_name,
+                        run,
+                    )
+                    metadata = checkpoint_metadata(
+                        args,
+                        cache_signature,
+                        function_name,
+                        optimizer_name,
+                        run,
+                        seed,
+                    )
+                    checkpoint_records[run] = (
+                        checkpoint_path,
+                        metadata,
+                    )
+
+                    cached_output = None
+                    if args.reuse_cache:
+                        cached_output = load_run_checkpoint(
+                            checkpoint_path,
+                            metadata,
+                        )
+
+                    if cached_output is None:
+                        pending_runs.append(run)
+                    else:
+                        completed.append(
+                            (run, cached_output)
+                        )
+                        print_status(
+                            f"CACHE HIT | function={function_name} | "
+                            f"optimizer={optimizer_name} | "
+                            f"run={run + 1}/{args.runs}"
+                        )
+
+                if len(pending_runs) == 0:
+                    print_status(
+                        f"CACHE COMPLETE | function={function_name} | "
+                        f"optimizer={optimizer_name} | "
+                        f"runs={args.runs}/{args.runs}"
+                    )
 
                 if (
                     args.parallel == "yes"
@@ -767,6 +996,9 @@ def main():
                     tasks = []
 
                     for run in pending_runs:
+                        checkpoint_path, metadata = checkpoint_records[
+                            run
+                        ]
 
                         tasks.append({
                             "run": run,
@@ -775,9 +1007,10 @@ def main():
                             "args": args,
                             "seed": args.seed_base + run,
                             "total_runs": args.runs,
+                            "checkpoint_path": checkpoint_path,
+                            "metadata": metadata,
                         })
 
-                    completed = []
                     print_status(
                         f"SUBMITTED | function={function_name} | "
                         f"optimizer={optimizer_name} | "
@@ -805,17 +1038,14 @@ def main():
                             print_status(
                                 f"PROGRESS | function={function_name} | "
                                 f"optimizer={optimizer_name} | "
-                                f"completed_runs={len(completed)}/{len(tasks)}"
+                                f"completed_runs={len(completed)}/{args.runs}"
                             )
 
-                    completed = sorted(
-                        completed,
-                        key=lambda x: x[0],
-                    )
-
                 else:
-                    completed = []
                     for run in pending_runs:
+                        checkpoint_path, metadata = checkpoint_records[
+                            run
+                        ]
                         output = run_single(
                             function_name,
                             optimizer_name,
@@ -825,9 +1055,25 @@ def main():
                             args.runs,
                         )
 
+                        save_run_checkpoint(
+                            checkpoint_path,
+                            metadata,
+                            output,
+                        )
+                        print_status(
+                            f"CHECKPOINT SAVED | function={function_name} | "
+                            f"optimizer={optimizer_name} | "
+                            f"run={run + 1}/{args.runs} | "
+                            f"path={checkpoint_path}"
+                        )
                         completed.append(
                             (run, output)
                         )
+
+                completed = sorted(
+                    completed,
+                    key=lambda x: x[0],
+                )
 
                 for run, output in completed:
 
@@ -909,46 +1155,11 @@ def main():
 
 
         if len(curves_plot) > 0:
-            plot_path = os.path.join(
-                paths.fig_dir,
-                f"{paths.exp_tag}_{function_name}_convergence.png",
-            )
-
-            plot_convergence(
+            plot_log_convergence(
                 curves_plot,
-                f"Convergence Curve - {function_name}",
-                plot_path,
+                function_name,
+                paths,
             )
-
-            extra_scale = resolve_convergence_scale(
-                curves_plot,
-                args.convergence_extra_scale,
-            )
-
-            if extra_scale is not None:
-                extra_plot_path = os.path.join(
-                    paths.fig_dir,
-                    (
-                        f"{paths.exp_tag}_{function_name}"
-                        f"_convergence_{extra_scale}.png"
-                    ),
-                )
-
-                scale_title = {
-                    "log": "Log Scale",
-                    "symlog": "Symmetric Log Scale",
-                    "exp": "Exponential Transform",
-                }[extra_scale]
-
-                plot_convergence(
-                    curves_plot,
-                    (
-                        f"Convergence Curve - "
-                        f"{function_name} ({scale_title})"
-                    ),
-                    extra_plot_path,
-                    yscale=extra_scale,
-                )
 
     excel_path = os.path.join(
         paths.res_dir,
