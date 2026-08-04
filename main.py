@@ -20,8 +20,8 @@ from dbo_optimizer import DBOOptimizer
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
 
-DEFAULT_EPOCHS = 3000
-DEFAULT_RUNS = 20
+DEFAULT_EPOCHS = 2000
+DEFAULT_RUNS = 30
 
 AVAILABLE_BENCHMARKS = {
 
@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Independent runs per optimizer")
     parser.add_argument("--seed-base", type=int, default=1234, help="Base random seed")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Execute runs in parallel")
-    parser.add_argument("--n-workers", type=int, default=None, help="Number of parallel workers")
+    parser.add_argument("--n-workers", type=int, default=8, help="Number of parallel workers")
     parser.add_argument("--convergence-extra-scale", default="none", choices=["none", "auto", "log", "symlog", "exp"], help="Save an additional convergence plot with the selected y-axis scale or transformation")
     parser.add_argument("--dsade-beta-min", type=float, default=0.2, help="Minimum adaptive beta")
     parser.add_argument("--dsade-beta-max", type=float, default=0.8, help="Maximum adaptive beta")

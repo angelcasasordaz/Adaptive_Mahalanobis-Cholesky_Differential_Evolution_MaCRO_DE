@@ -42,6 +42,7 @@ class MaCRO_DE(Optimizer):
         self.fmean_hist = None
         self.div_max_seen = None
         self.div_norm_for_update = 1.0
+        self.mahalanobis_threshold = None
 
     def initialize_variables(self):
         self.div_awad_hist = np.full(self.epoch, np.nan, dtype=float)
@@ -50,11 +51,15 @@ class MaCRO_DE(Optimizer):
         self.fmean_hist = np.full(self.epoch, np.nan, dtype=float)
         self.div_norm_for_update = 1.0
         self.div_max_seen = None
+        self.mahalanobis_threshold = None
 
     def before_main_loop(self):
         pop_pos = self._positions(self.pop)
         div0 = self._awad(pop_pos, self.problem.lb, self.problem.ub)
         self.div_max_seen = max(div0, self.EPSILON)
+        self.mahalanobis_threshold = float(
+            chi2.ppf(self.mahalanobis_q, max(self.problem.n_dims, 1))
+        )
 
     def _positions(self, pop):
         return np.array([agent.solution for agent in pop], dtype=float)
@@ -115,7 +120,9 @@ class MaCRO_DE(Optimizer):
         sigma_inv = self._safe_cov_inv(pop_pos)
         d = pop_pos - mu
         dist2 = np.sum((d @ sigma_inv) * d, axis=1)
-        thr = chi2.ppf(self.mahalanobis_q, max(n_dims, 1))
+        thr = self.mahalanobis_threshold
+        if thr is None:
+            thr = float(chi2.ppf(self.mahalanobis_q, max(n_dims, 1)))
         close_mask = dist2 <= thr
         close_particles = pop_pos[close_mask]
         far_particles = pop_pos[~close_mask]
@@ -135,10 +142,12 @@ class MaCRO_DE(Optimizer):
 
         f_used_sum = 0.0
         pop_new = []
+        pop_pos = self._positions(self.pop)
+        pool = self._mutation_pool(pop_pos, div_norm_used)
+        if pool.shape[0] < 3:
+            pool = pop_pos
 
         for idx in range(self.pop_size):
-            pop_pos = self._positions(self.pop)
-            pool = self._mutation_pool(pop_pos, div_norm_used)
             idxs = self.generator.choice(pool.shape[0], 3, replace=False)
             x1, x2, x3 = pool[idxs[0]], pool[idxs[1]], pool[idxs[2]]
 

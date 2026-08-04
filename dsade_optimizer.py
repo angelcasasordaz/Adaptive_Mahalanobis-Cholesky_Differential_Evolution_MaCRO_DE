@@ -98,6 +98,7 @@ class DSADE(Optimizer):
 
         self.div_max_seen = None
         self.div_norm_for_update = 1.0
+        self.mahalanobis_threshold = None
 
     # =====================================================
     # INITIALIZATION
@@ -132,6 +133,7 @@ class DSADE(Optimizer):
         self.div_norm_for_update = 1.0
 
         self.div_max_seen = None
+        self.mahalanobis_threshold = None
 
     # =====================================================
     # BEFORE MAIN LOOP
@@ -150,6 +152,12 @@ class DSADE(Optimizer):
         self.div_max_seen = max(
             div0,
             self.EPSILON,
+        )
+        self.mahalanobis_threshold = float(
+            chi2.ppf(
+                self.mahalanobis_q,
+                max(self.problem.n_dims, 1),
+            )
         )
 
     # =====================================================
@@ -309,10 +317,14 @@ class DSADE(Optimizer):
             axis=1,
         )
 
-        thr = chi2.ppf(
-            self.mahalanobis_q,
-            max(n_dims, 1),
-        )
+        thr = self.mahalanobis_threshold
+        if thr is None:
+            thr = float(
+                chi2.ppf(
+                    self.mahalanobis_q,
+                    max(n_dims, 1),
+                )
+            )
 
         close_mask = dist2 <= thr
 
@@ -378,26 +390,20 @@ class DSADE(Optimizer):
         f_used_sum = 0.0
 
         pop_new = []
+        pop_pos = self._positions(self.pop)
+        pool = self._mutation_pool(
+            pop_pos,
+            div_norm_used,
+        )
+
+        if pool.shape[0] < 4:
+            pool = pop_pos
 
         # =================================================
         # MAIN EVOLUTION LOOP
         # =================================================
 
         for idx in range(self.pop_size):
-
-            pop_pos = self._positions(self.pop)
-
-            pool = self._mutation_pool(
-                pop_pos,
-                div_norm_used,
-            )
-
-            # =============================================
-            # SAFE FALLBACK
-            # =============================================
-
-            if pool.shape[0] < 4:
-                pool = pop_pos
 
             idxs = self.generator.choice(
                 pool.shape[0],
