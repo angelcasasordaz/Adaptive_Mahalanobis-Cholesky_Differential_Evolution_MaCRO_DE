@@ -1,16 +1,14 @@
 # ============================================================
-# graphic_methodology_v2.py
+# graphic_methodology.py
 # ============================================================
 
 import importlib
 import inspect
 import logging
-import multiprocessing
 import os
 import re
 import warnings
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from queue import Empty
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +16,7 @@ from mealpy import FloatVar
 from scipy.linalg import cholesky
 from scipy.stats import chi2
 
-from macro_de_optimizer_v2 import MaCRO_DE
+from macro_de_optimizer import MaCRO_DE
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.disable(logging.INFO)
@@ -30,14 +28,13 @@ logging.disable(logging.INFO)
 # them for quick smoke tests without editing the file.
 # ============================================================
 
-DEFAULT_EXPERIMENT_ID = "EXP004"
+DEFAULT_EXPERIMENT_ID = "EXP005"
 DEFAULT_OUTPUT_FOLDER = "Methodology_Graphics"
 DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_DIMENSIONS = 30
 DEFAULT_POP_SIZE = 50
-DEFAULT_EPOCHS = 2000
+DEFAULT_EPOCHS = 5000
 DEFAULT_RUNS = 2
-DEFAULT_PROGRESS_INTERVAL = 25
 
 EXPERIMENT_ID = os.getenv("GM_EXP_ID", DEFAULT_EXPERIMENT_ID)
 OUTPUT_FOLDER = os.getenv("GM_OUTPUT_FOLDER", DEFAULT_OUTPUT_FOLDER)
@@ -58,7 +55,6 @@ N_WORKERS = int(os.getenv(
     "GM_N_WORKERS",
     str(max(1, min((os.cpu_count() or 1) - 1, RUNS))),
 ))
-PROGRESS_INTERVAL = int(os.getenv("GM_PROGRESS_INTERVAL", str(DEFAULT_PROGRESS_INTERVAL)))
 SELECTED_FUNCTIONS = [
     item.strip()
     for item in os.getenv("GM_FUNCTIONS", "ALL").split(",")
@@ -136,7 +132,7 @@ def generate_ellipsoid(mean, covariance, q=0.68, resolution=40):
     return ellipsoid
 
 
-def plot_mahalanobis(function_name, population):
+def plot_mahalanobis(function_name, population, best_solution=None):
     if not PLOT_MAHALANOBIS or population.shape[1] < 3:
         return None
 
@@ -150,11 +146,22 @@ def plot_mahalanobis(function_name, population):
         population_3d[:, 2],
         c=distances,
         cmap="viridis",
+        vmin=float(np.min(distances)),
+        vmax=float(np.max(distances)),
         s=60,
         label="Population",
     )
     cbar = plt.colorbar(scatter)
-    cbar.set_label("Mahalanobis Distance")
+    cbar.set_label("Mahalanobis distance: close to far")
+    min_distance = float(np.min(distances))
+    max_distance = float(np.max(distances))
+    tick_values = np.linspace(min_distance, max_distance, 6)
+    tick_labels = [f"{tick:.2f}" for tick in tick_values]
+    if tick_labels:
+        tick_labels[0] = f"Closest {tick_labels[0]}"
+        tick_labels[-1] = f"Farthest {tick_labels[-1]}"
+        cbar.set_ticks(tick_values)
+        cbar.set_ticklabels(tick_labels)
 
     ellipsoid = generate_ellipsoid(mean, covariance, q=MAHALANOBIS_Q)
     ax.plot_surface(
@@ -165,14 +172,36 @@ def plot_mahalanobis(function_name, population):
         alpha=0.18,
         linewidth=0,
     )
-    ax.scatter(mean[0], mean[1], mean[2], c="red", s=120, marker="o", label="Mean")
+    ax.scatter(
+        mean[0],
+        mean[1],
+        mean[2],
+        c="red",
+        s=120,
+        marker="o",
+        label="Population mean",
+    )
+
+    if best_solution is not None:
+        best_solution_3d = np.asarray(best_solution, dtype=float)[:3]
+        ax.scatter(
+            best_solution_3d[0],
+            best_solution_3d[1],
+            best_solution_3d[2],
+            c="red",
+            edgecolors="red",
+            linewidths=0.8,
+            s=190,
+            marker="*",
+            label="x_best",
+        )
     ax.set_title(f"{function_name} - Iteration {EPOCHS}")
     ax.set_xlabel("X1")
     ax.set_ylabel("X2")
     ax.set_zlabel("X3")
     ax.legend()
     plt.tight_layout()
-    out_path = os.path.join(MAHALANOBIS_DIR, f"{function_name}.png")
+    out_path = os.path.join(MAHALANOBIS_DIR, f"{function_name}_{EPOCHS}.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     return out_path
@@ -189,13 +218,13 @@ def plot_convergence(function_name, mean_curve):
     plt.title(f"{function_name} Mean Convergence")
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    out_path = os.path.join(CONVERGENCE_DIR, f"{function_name}.png")
+    out_path = os.path.join(CONVERGENCE_DIR, f"{function_name}_{EPOCHS}.png")
     plt.savefig(out_path, dpi=300)
     plt.close()
     return out_path
 
 
-def run_single(function_name, function_class, run, progress_queue=None):
+def run_single(function_name, function_class, run):
     logging.disable(logging.INFO)
     np.random.seed(RANDOM_SEED + run)
     benchmark = create_function(function_class)
@@ -215,23 +244,18 @@ def run_single(function_name, function_class, run, progress_queue=None):
         beta_max=BETA_MAX,
         pcr=PCR,
         mahalanobis_q=MAHALANOBIS_Q,
-        progress_queue=progress_queue,
-        progress_interval=PROGRESS_INTERVAL,
-        progress_context={
-            "function_name": function_name,
-            "run": run,
-        },
     )
     g_best = optimizer.solve(problem)
     curve = np.array(optimizer.history.list_global_best_fit)
-    last_population = None
-
-    if len(optimizer.population_history) > 0:
-        last_population = optimizer.population_history[-1]
+    last_population = np.array(
+        [agent.solution for agent in optimizer.pop],
+        dtype=float,
+    )
 
     return {
         "run": run,
         "best_fitness": float(g_best.target.fitness),
+        "best_solution": np.array(g_best.solution, dtype=float),
         "curve": curve,
         "last_population": last_population,
     }
@@ -242,24 +266,7 @@ def run_parallel_task(task):
         task["function_name"],
         task["function_class"],
         task["run"],
-        task.get("progress_queue"),
     )
-
-
-def drain_progress(progress_queue):
-    while True:
-        try:
-            message = progress_queue.get_nowait()
-        except Empty:
-            break
-
-        print(
-            f"[{message['function_name']}] "
-            f"Run {message['run'] + 1:02d}/{RUNS} | "
-            f"Epoch {message['epoch']:04d}/{message['total_epochs']} | "
-            f"Best = {message['best_fitness']:.6e}",
-            flush=True,
-        )
 
 
 def run_function(function_name, function_class):
@@ -269,14 +276,11 @@ def run_function(function_name, function_class):
 
     if PARALLEL and RUNS > 1:
         completed = []
-        manager = multiprocessing.Manager()
-        progress_queue = manager.Queue()
         tasks = [
             {
                 "function_name": function_name,
                 "function_class": function_class,
                 "run": run,
-                "progress_queue": progress_queue,
             }
             for run in range(RUNS)
         ]
@@ -293,7 +297,6 @@ def run_function(function_name, function_class):
                     timeout=1,
                     return_when=FIRST_COMPLETED,
                 )
-                drain_progress(progress_queue)
 
                 for future in done:
                     task = futures.pop(future)
@@ -314,9 +317,6 @@ def run_function(function_name, function_class):
                         flush=True,
                     )
 
-            drain_progress(progress_queue)
-
-        manager.shutdown()
     else:
         completed = []
 
@@ -331,14 +331,23 @@ def run_function(function_name, function_class):
 
     completed = sorted(completed, key=lambda item: item["run"])
     curves = [item["curve"] for item in completed]
-    last_population = completed[-1]["last_population"]
+    best_result = min(completed, key=lambda item: item["best_fitness"])
+    last_population = best_result["last_population"]
+    best_solution = best_result["best_solution"]
     mean_curve = np.mean(np.array(curves), axis=0)
     convergence_path = plot_convergence(function_name, mean_curve)
     if convergence_path is not None:
         print(f"Saved convergence: {convergence_path}", flush=True)
 
     if last_population is not None:
-        mahalanobis_path = plot_mahalanobis(function_name, last_population)
+        mean_3d = np.mean(last_population[:, :3], axis=0)
+        xbest_3d = best_solution[:3]
+        print(
+            f"Mean vs x_best distance (first 3 dimensions): "
+            f"{np.linalg.norm(mean_3d - xbest_3d):.6e}",
+            flush=True,
+        )
+        mahalanobis_path = plot_mahalanobis(function_name, last_population, best_solution)
         if mahalanobis_path is not None:
             print(f"Saved Mahalanobis: {mahalanobis_path}", flush=True)
 
@@ -354,7 +363,6 @@ def main():
     print(f"Runs        : {RUNS}")
     print(f"Parallel    : {PARALLEL}")
     print(f"Workers     : {N_WORKERS}")
-    print(f"Progress    : every {PROGRESS_INTERVAL} epochs")
     print("=" * 60)
 
     function_map = discover_functions(BENCHMARK)
