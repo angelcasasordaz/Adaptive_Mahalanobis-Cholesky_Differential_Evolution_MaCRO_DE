@@ -5,12 +5,10 @@
 import importlib
 import inspect
 import logging
-import multiprocessing
 import os
 import re
 import warnings
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from queue import Empty
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +16,7 @@ from mealpy import FloatVar
 from scipy.linalg import cholesky
 from scipy.stats import chi2
 
-from macro_de_optimizer_v2 import MaCRO_DE
+from macro_de_optimizer import MaCRO_DE
 
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.disable(logging.INFO)
@@ -37,7 +35,6 @@ DEFAULT_DIMENSIONS = 30
 DEFAULT_POP_SIZE = 50
 DEFAULT_EPOCHS = 5000
 DEFAULT_RUNS = 2
-DEFAULT_PROGRESS_INTERVAL = 25
 
 EXPERIMENT_ID = os.getenv("GM_EXP_ID", DEFAULT_EXPERIMENT_ID)
 OUTPUT_FOLDER = os.getenv("GM_OUTPUT_FOLDER", DEFAULT_OUTPUT_FOLDER)
@@ -58,7 +55,6 @@ N_WORKERS = int(os.getenv(
     "GM_N_WORKERS",
     str(max(1, min((os.cpu_count() or 1) - 1, RUNS))),
 ))
-PROGRESS_INTERVAL = int(os.getenv("GM_PROGRESS_INTERVAL", str(DEFAULT_PROGRESS_INTERVAL)))
 SELECTED_FUNCTIONS = [
     item.strip()
     for item in os.getenv("GM_FUNCTIONS", "ALL").split(",")
@@ -228,7 +224,7 @@ def plot_convergence(function_name, mean_curve):
     return out_path
 
 
-def run_single(function_name, function_class, run, progress_queue=None):
+def run_single(function_name, function_class, run):
     logging.disable(logging.INFO)
     np.random.seed(RANDOM_SEED + run)
     benchmark = create_function(function_class)
@@ -248,19 +244,13 @@ def run_single(function_name, function_class, run, progress_queue=None):
         beta_max=BETA_MAX,
         pcr=PCR,
         mahalanobis_q=MAHALANOBIS_Q,
-        progress_queue=progress_queue,
-        progress_interval=PROGRESS_INTERVAL,
-        progress_context={
-            "function_name": function_name,
-            "run": run,
-        },
     )
     g_best = optimizer.solve(problem)
     curve = np.array(optimizer.history.list_global_best_fit)
-    last_population = None
-
-    if len(optimizer.population_history) > 0:
-        last_population = optimizer.population_history[-1]
+    last_population = np.array(
+        [agent.solution for agent in optimizer.pop],
+        dtype=float,
+    )
 
     return {
         "run": run,
@@ -276,24 +266,7 @@ def run_parallel_task(task):
         task["function_name"],
         task["function_class"],
         task["run"],
-        task.get("progress_queue"),
     )
-
-
-def drain_progress(progress_queue):
-    while True:
-        try:
-            message = progress_queue.get_nowait()
-        except Empty:
-            break
-
-        print(
-            f"[{message['function_name']}] "
-            f"Run {message['run'] + 1:02d}/{RUNS} | "
-            f"Epoch {message['epoch']:04d}/{message['total_epochs']} | "
-            f"Best = {message['best_fitness']:.6e}",
-            flush=True,
-        )
 
 
 def run_function(function_name, function_class):
@@ -303,14 +276,11 @@ def run_function(function_name, function_class):
 
     if PARALLEL and RUNS > 1:
         completed = []
-        manager = multiprocessing.Manager()
-        progress_queue = manager.Queue()
         tasks = [
             {
                 "function_name": function_name,
                 "function_class": function_class,
                 "run": run,
-                "progress_queue": progress_queue,
             }
             for run in range(RUNS)
         ]
@@ -327,7 +297,6 @@ def run_function(function_name, function_class):
                     timeout=1,
                     return_when=FIRST_COMPLETED,
                 )
-                drain_progress(progress_queue)
 
                 for future in done:
                     task = futures.pop(future)
@@ -348,9 +317,6 @@ def run_function(function_name, function_class):
                         flush=True,
                     )
 
-            drain_progress(progress_queue)
-
-        manager.shutdown()
     else:
         completed = []
 
@@ -397,7 +363,6 @@ def main():
     print(f"Runs        : {RUNS}")
     print(f"Parallel    : {PARALLEL}")
     print(f"Workers     : {N_WORKERS}")
-    print(f"Progress    : every {PROGRESS_INTERVAL} epochs")
     print("=" * 60)
 
     function_map = discover_functions(BENCHMARK)
