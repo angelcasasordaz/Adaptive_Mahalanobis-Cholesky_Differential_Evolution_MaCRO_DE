@@ -1,0 +1,147 @@
+==== 1964 ====
+1964 - Evolutionary Programming (EP)
+
+==== 1971 ====
+1971 - Evolution Strategies (ES)
+
+==== 1983 ====
+1983 - Simulated Annealing (SA)
+
+==== 1989 ====
+1989 - Memetic Algorithm (MA)
+
+==== 1992 ====
+1992 - Genetic Algorithm (GA)
+
+==== 1993 ====
+1993 - Hill Climbing (HC)
+
+==== 1994 ====
+1994 - Culture Algorithm (CA)
+
+==== 1995 ====
+1995 - Particle Swarm Optimization (PSO)
+
+==== 1997 ====
+1997 - Differential Evolution (DE)
+1997 - Cross-Entropy Method (CEM)
+
+==== 2001 ====
+2001 - Harmony Search (HS)
+
+==== 2002 ====
+2002 - Bacterial Foraging Optimization (BFO)
+
+==== 2004 ====
+2004 - Tabu Search (TS)
+
+==== 2005 ====
+2005 - Artificial Bee Colony (ABC)
+2005 - Bees Algorithm (BeesA)
+
+==== 2006 ====
+2006 - Cat Swarm Optimization (CSO)
+2006 - Invasive Weed Optimization (IWO)
+
+==== 2007 ====
+2007 - Imperialist Competitive Algorithm (ICA)
+
+==== 2008 ====
+2008 - Biogeography-Based Optimization (BBO)
+2008 - Ant Colony Optimization (ACOR)
+
+==== 2009 ====
+2009 - Cuckoo Search (CSA)
+2009 - Firefly Algorithm (FFA)
+
+==== 2010 ====
+2010 - Bat Algorithm (BA)
+2010 - Fireworks Algorithm (FA)
+
+==== 2011 ====
+2011 - Teaching Learning-Based Optimization (TLO)
+2011 - Brain Storm Optimization (BSO)
+
+==== 2012 ====
+2012 - Fruit Fly Optimization Algorithm (FOA)
+2012 - Water Cycle Algorithm (WCA)
+
+==== 2013 ====
+2013 - Wind Driven Optimization (WDO)
+
+==== 2014 ====
+2014 - Grey Wolf Optimizer (GWO)
+2014 - Flower Pollination Algorithm (FPA)
+2014 - Coral Reefs Optimization (CRO)
+
+==== 2015 ====
+2015 - Ant Lion Optimizer (ALO)
+2015 - Moth Flame Optimization (MFO)
+2015 - Elephant Herding Optimization (EHO)
+
+==== 2016 ====
+2016 - Whale Optimization Algorithm (WOA)
+2016 - Dragonfly Optimization (DO)
+2016 - Bird Swarm Algorithm (BSA)
+2016 - Multi-Verse Optimizer (MVO)
+2016 - Tug of War Optimization (TWO)
+2016 - Electromagnetic Field Optimization (EFO)
+2016 - Virus Colony Search (VCS)
+
+==== 2017 ====
+2017 - Salp Swarm Optimization (SSO)
+2017 - Grasshopper Optimization Algorithm (GOA)
+2017 - Spotted Hyena Optimizer (SHO)
+2017 - Satin Bowerbird Optimizer (SBO)
+
+==== 2018 ====
+2018 - Earthworm Optimization Algorithm (EOA)
+2018 - Social Spider Optimization (SSpiderO)
+2018 - Coyote Optimization Algorithm (COA)
+2018 - Moth Search Algorithm (MSA)
+
+==== 2019 ====
+2019 - Harris Hawks Optimization (HHO)
+2019 - Equilibrium Optimizer (EO)
+2019 - Henry Gas Solubility Optimization (HGSO)
+2019 - Atom Search Optimization (ASO)
+2019 - Artificial Ecosystem Optimization (AEO)
+2019 - Seagull Optimization Algorithm (SOA)
+2019 - Wildebeest Herd Optimization (WHO)
+
+==== 2020 ====
+2020 - Slime Mould Algorithm (SMA)
+2020 - Marine Predators Algorithm (MPA)
+2020 - Sparrow Search Algorithm (SSA)
+2020 - Bald Eagle Search (BES)
+2020 - Tunicate Swarm Algorithm (TSA)
+2020 - Gradient-Based Optimizer (GBO)
+2020 - Battle Royale Optimization (BRO)
+
+==== 2021 ====
+2021 - Arithmetic Optimization Algorithm (AOA)
+2021 - Runge Kutta Optimizer (RUN)
+2021 - Aquila Optimizer (AO)
+2021 - Hunger Games Search (HGS)
+2021 - Artificial Gorilla Troops Optimization (AGTO)
+
+==== 2022 ====
+2022 - Northern Goshawk Optimization (NGO)
+2022 - Artificial Rabbits Optimization (ARO)
+2022 - African Vultures Optimization (AVOA)
+2022 - Golden Jackal Optimization (GJO)
+2022 - Mountain Gazelle Optimizer (MGO)
+2022 - Sea Horse Optimization (SeaHO)
+2022 - Honey Badger Algorithm (HBA)
+2022 - Sand Cat Swarm Optimization (SCSO)
+2022 - Egret Swarm Optimization (ESOA)
+
+==== 2023 ====
+2023 - Fox Optimizer (FOX)
+2023 - Brown Bear Optimization Algorithm (BBOA)
+2023 - Energy Valley Optimization (EVO)
+2023 - Fick's Law Algorithm (FLA)
+2023 - RIME Optimization (RIME)
+
+==== 2025 ====
+2025 - Electrical Storm Optimization (ESO)
