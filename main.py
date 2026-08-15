@@ -9,16 +9,16 @@ import pickle
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from functools import lru_cache
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import mealpy
-from mealpy import FloatVar, get_optimizer_by_name
+from mealpy import FloatVar
 
-from dbo_optimizer import DBOOptimizer
-from dsade_optimizer import DSADE
-from macro_de_optimizer import MaCRO_DE
+from algorithm_acronym_list import (
+    CUSTOM_OPTIMIZERS,
+    optimizer_class as resolve_optimizer_class,
+    resolve_optimizer_name,
+)
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
@@ -57,41 +57,17 @@ DEFAULT_OPTIMIZERS = [
     "WOA",
 ]
 
-CHART_PALETTE = {
-    "DSADE": "#3266ad",
-    "DSADE_AWAD": "#d1495b",
-    "MaCRO-DE": "#3266ad",
-    "DBO": "#00a6a6",
-    "OriginalGWO": "#e06c00",
-    "OriginalWOA": "#2a9d5c",
-    "OriginalCA": "#c44569",
-    "OriginalPSO": "#9b59b6",
-    "OriginalDE": "#6a4c93",
-    "JADE": "#2d6a4f",
-    "SADE": "#f4a261",
-    "OriginalSHADE": "#264653",
-    "OriginalFOX": "#1b9aaa",
-    "OriginalRIME": "#e76f51",
-    "OriginalBRO": "#577590",
-    "OriginalDMOA": "#90be6d",
-    "OriginalMGO": "#f9844a",
-    "OriginalHHO": "#4d4d4d",
-    "OriginalGOA": "#8a5a44",
-    "BRO": "#577590",
-    "DE": "#6a4c93",
-    "DMO": "#90be6d",
-    "GWO": "#e06c00",
-    "HHO": "#4d4d4d",
-    "MFO": "#8a5a44",
-    "MGO": "#f9844a",
-    "PSO": "#9b59b6",
-    "SHADE": "#264653",
-    "WOA": "#2a9d5c",
-}
+CHART_CMAP = "tab20"
 
-MEALPY_OPTIMIZER_ALIASES = {
-    "dmo": "DMOA",
-}
+# Qualitative:
+# "tab10"
+# "tab20"
+# "Set1"
+# "Set2"
+# "Set3"
+# "Dark2"
+# "Paired"
+# "Accent"
 
 @dataclass
 class Paths:
@@ -221,36 +197,15 @@ def build_optimizer(
     args,
 ):
 
-    optimizer_key = normalize_optimizer_name(name)
-
-    if optimizer_key == "dsade":
-        optimizer_class = DSADE
-        optimizer_kwargs = custom_optimizer_kwargs(args)
-    elif optimizer_key == "macrode":
-        optimizer_class = MaCRO_DE
-        optimizer_kwargs = custom_optimizer_kwargs(args)
-    elif optimizer_key == "dbo":
-        optimizer_class = DBOOptimizer
-        optimizer_kwargs = {
-            "epoch": args.epochs,
-            "pop_size": args.pop_size,
-        }
-    else:
-        optimizer_class = resolve_mealpy_optimizer(name)
-        optimizer_kwargs = {
-            "epoch": args.epochs,
-            "pop_size": args.pop_size,
-        }
+    optimizer_name = resolve_optimizer_name(name)
+    optimizer_class = resolve_optimizer_class(name)
+    optimizer_kwargs = optimizer_init_kwargs(
+        optimizer_class,
+        optimizer_name,
+        args,
+    )
 
     return optimizer_class(**optimizer_kwargs)
-
-def normalize_optimizer_name(name):
-
-    return "".join(
-        char.lower()
-        for char in str(name)
-        if char.isalnum()
-    )
 
 def display_optimizer_name(name):
 
@@ -261,6 +216,22 @@ def display_optimizer_name(name):
             return label[len(prefix):]
 
     return label
+
+def is_macro_de_optimizer(name):
+
+    try:
+        return resolve_optimizer_name(name) == "MaCRO-DE"
+    except ValueError:
+        return str(name) == "MaCRO-DE"
+
+def build_optimizer_colors(optimizer_names):
+
+    cmap = plt.get_cmap(CHART_CMAP)
+
+    return {
+        optimizer_name: cmap(index % cmap.N)
+        for index, optimizer_name in enumerate(optimizer_names)
+    }
 
 def resolve_convergence_scale(
     curves_dict,
@@ -302,133 +273,37 @@ def resolve_convergence_scale(
 
     return requested_scale
 
-def custom_optimizer_kwargs(args):
+def optimizer_init_kwargs(
+    optimizer_class,
+    optimizer_name,
+    args,
+):
 
-    return {
+    optimizer_kwargs = {
         "epoch": args.epochs,
         "pop_size": args.pop_size,
+    }
+
+    if optimizer_name not in CUSTOM_OPTIMIZERS:
+        return optimizer_kwargs
+
+    custom_kwargs = {
         "beta_min": args.dsade_beta_min,
         "beta_max": args.dsade_beta_max,
         "pcr": args.dsade_pcr,
         "mahalanobis_q": args.dsade_mahal_q,
     }
+    init_params = inspect.signature(
+        optimizer_class.__init__
+    ).parameters
 
-@lru_cache(maxsize=None)
-def resolve_mealpy_optimizer(name):
+    optimizer_kwargs.update({
+        key: value
+        for key, value in custom_kwargs.items()
+        if key in init_params
+    })
 
-    optimizer_key = normalize_optimizer_name(name)
-    resolved_name = MEALPY_OPTIMIZER_ALIASES.get(
-        optimizer_key,
-        name,
-    )
-    match_keys = {
-        optimizer_key,
-        normalize_optimizer_name(resolved_name),
-    }
-
-    for module_name in mealpy_module_candidates(resolved_name):
-        optimizer_class = find_mealpy_optimizer_in_module(
-            module_name,
-            match_keys,
-        )
-        if optimizer_class is not None:
-            return optimizer_class
-
-    for module_name, obj in inspect.getmembers(mealpy):
-        if not inspect.ismodule(obj):
-            continue
-
-        optimizer_class = find_mealpy_optimizer_in_module(
-            module_name,
-            match_keys,
-        )
-        if optimizer_class is not None:
-            return optimizer_class
-
-    raise ValueError(
-        f"Unknown Mealpy optimizer: {name}"
-    )
-
-def mealpy_module_candidates(name):
-
-    raw_name = str(name).replace("-", "_")
-    compact_name = "".join(
-        char
-        for char in raw_name
-        if char.isalnum() or char == "_"
-    )
-    parts = [
-        part
-        for part in compact_name.split("_")
-        if part
-    ]
-
-    candidates = [
-        raw_name,
-        compact_name,
-    ]
-
-    for prefix in ("Original", "Dev", "Base"):
-        if compact_name.lower().startswith(prefix.lower()):
-            candidates.append(
-                compact_name[len(prefix):]
-            )
-
-    if parts:
-        candidates.append(parts[-1])
-
-    seen = set()
-    for candidate in candidates:
-        if not candidate:
-            continue
-
-        normalized = candidate.upper()
-        if normalized in seen:
-            continue
-
-        seen.add(normalized)
-        yield normalized
-
-def find_mealpy_optimizer_in_module(
-    module_name,
-    optimizer_keys,
-):
-
-    optimizers = get_optimizer_by_name(module_name)
-    exact_match = None
-    original_match = None
-    prefixed_match = None
-
-    for class_name, optimizer_class in optimizers.items():
-        if class_name == "Optimizer":
-            continue
-
-        if normalize_optimizer_name(class_name) in optimizer_keys:
-            exact_match = optimizer_class
-            continue
-
-        for prefix in ("Original", "Dev", "Base"):
-            if class_name.startswith(prefix):
-                stripped_key = normalize_optimizer_name(
-                    class_name[len(prefix):]
-                )
-                if stripped_key not in optimizer_keys:
-                    continue
-                if prefix == "Original":
-                    original_match = optimizer_class
-                elif prefixed_match is None:
-                    prefixed_match = optimizer_class
-
-    if exact_match is not None:
-        return exact_match
-
-    if original_match is not None:
-        return original_match
-
-    if prefixed_match is not None:
-        return prefixed_match
-
-    return None
+    return optimizer_kwargs
 
 def build_problem(
     function_class,
@@ -698,6 +573,7 @@ def plot_convergence(
     curves_dict,
     title,
     out_path,
+    optimizer_colors,
     yscale="linear",
 ):
 
@@ -706,20 +582,12 @@ def plot_convergence(
         facecolor="white",
     )
 
-    plot_items = [
-        item
-        for item in curves_dict.items()
-        if item[0] != "MaCRO-DE"
-    ]
-    if "MaCRO-DE" in curves_dict:
-        plot_items.append(
-            (
-                "MaCRO-DE",
-                curves_dict["MaCRO-DE"],
-            )
-        )
+    plot_items = list(curves_dict.items())
 
     for optimizer_name, curve in plot_items:
+        is_macro_de = is_macro_de_optimizer(
+            optimizer_name
+        )
 
         curve = np.asarray(
             curve,
@@ -747,12 +615,12 @@ def plot_convergence(
         else:
             plot_curve = curve
 
-        color = CHART_PALETTE.get(
+        color = optimizer_colors.get(
             optimizer_name,
             None,
         )
 
-        if optimizer_name == "MaCRO-DE":
+        if is_macro_de:
             ax.plot(
                 plot_curve,
                 linewidth=4.4,
@@ -763,7 +631,7 @@ def plot_convergence(
 
         ax.plot(
             plot_curve,
-            linewidth=3.0 if optimizer_name == "MaCRO-DE" else 2.2,
+            linewidth=3.0 if is_macro_de else 2.2,
             label=display_optimizer_name(
                 optimizer_name
             ),
@@ -793,6 +661,7 @@ def plot_log_convergence(
     curves_dict,
     function_name,
     paths,
+    optimizer_colors,
 ):
 
     plot_convergence(
@@ -802,6 +671,7 @@ def plot_log_convergence(
             paths.fig_dir,
             f"{paths.exp_tag}_{function_name}_convergence_log.png",
         ),
+        optimizer_colors,
         yscale="log",
     )
 
@@ -848,6 +718,7 @@ def main():
     logging.disable(logging.INFO)
     paths = make_paths(args)
     cache_signature = build_cache_signature(args)
+    optimizer_colors = build_optimizer_colors(args.optimizers)
     function_map = discover_benchmark_functions(
         args.benchmark,
         args.dims,
@@ -1159,6 +1030,7 @@ def main():
                 curves_plot,
                 function_name,
                 paths,
+                optimizer_colors,
             )
 
     excel_path = os.path.join(

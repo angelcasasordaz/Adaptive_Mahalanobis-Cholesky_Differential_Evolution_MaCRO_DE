@@ -3,12 +3,13 @@ from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
-class DSADE(Optimizer):
+class DSADE_AWAD(Optimizer):
     """
     Diversity-based Self-Adaptive Control in Differential Evolution (DSADE)
     with:
     - Delayed AWAD diversity-adaptive control
     - Mahalanobis grouping for mutation pool sampling
+    - AWAD-aware survivor selection
     """
 
     def __init__(
@@ -126,6 +127,43 @@ class DSADE(Optimizer):
             return far_particles
         return pop_pos
 
+    def local_awad_contribution(self, candidate_pos, base_pop_pos):
+        """
+        Estimate the local AWAD contribution of one candidate in the current
+        population context. The compared parent is removed from base_pop_pos by
+        the caller, so parent and offspring are scored under the same context.
+        """
+        candidate_pos = np.asarray(candidate_pos, dtype=float)
+        base_pop_pos = np.asarray(base_pop_pos, dtype=float)
+        if base_pop_pos.size == 0:
+            local_pop = candidate_pos.reshape(1, -1)
+        else:
+            local_pop = np.vstack((base_pop_pos, candidate_pos))
+        return self._awad(local_pop, self.problem.lb, self.problem.ub)
+
+    def diversity_selection(self, parent, offspring, base_pop_pos):
+        """
+        Select between parent and offspring using fitness first, then AWAD.
+        Better fitness is always accepted. Otherwise, the offspring survives
+        only if it improves the local AWAD contribution.
+        """
+        if self.compare_target(offspring.target, parent.target, self.problem.minmax):
+            return offspring
+
+        offspring_awad = self.local_awad_contribution(offspring.solution, base_pop_pos)
+        parent_awad = self.local_awad_contribution(parent.solution, base_pop_pos)
+        if offspring_awad > parent_awad + self.EPSILON:
+            return offspring
+        return parent
+
+    def _diversity_selection_population(self, pop_old, pop_new):
+        old_pos = self._positions(pop_old)
+        selected = []
+        for idx, (parent, offspring) in enumerate(zip(pop_old, pop_new)):
+            base_pop_pos = np.delete(old_pos, idx, axis=0)
+            selected.append(self.diversity_selection(parent, offspring, base_pop_pos))
+        return selected
+
     def evolve(self, epoch):
         epoch_idx = epoch - 1
         div_norm_used = float(np.clip(self.div_norm_for_update, 0.0, 1.0))
@@ -159,13 +197,14 @@ class DSADE(Optimizer):
 
             if self.mode not in self.AVAILABLE_MODES:
                 candidate.target = self.get_target(z)
-                self.pop[idx] = self.get_better_agent(candidate, self.pop[idx], self.problem.minmax)
+                base_pop_pos = np.delete(pop_pos, idx, axis=0)
+                self.pop[idx] = self.diversity_selection(self.pop[idx], candidate, base_pop_pos)
             else:
                 pop_new.append(candidate)
 
         if self.mode in self.AVAILABLE_MODES:
             pop_new = self.update_target_for_population(pop_new)
-            self.pop = self.greedy_selection_population(self.pop, pop_new, self.problem.minmax)
+            self.pop = self._diversity_selection_population(self.pop, pop_new)
 
         self.fmean_hist[epoch_idx] = f_used_sum / self.pop_size
 
@@ -178,5 +217,6 @@ class DSADE(Optimizer):
         self.div_norm_for_update = div_norm_now
 
 
-# Backward compatibility alias
-IMPDE = DSADE
+# Backward compatibility aliases
+DSADE_AWAD = DSADE_AWAD
+
