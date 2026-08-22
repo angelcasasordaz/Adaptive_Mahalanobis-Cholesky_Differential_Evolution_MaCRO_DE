@@ -20,8 +20,16 @@ from algorithm_acronym_list import (
     resolve_optimizer_name,
 )
 
-DEFAULT_EPOCHS = 2000
-DEFAULT_RUNS = 30
+DEFAULT_EPOCHS = 1000
+DEFAULT_RUNS = 20
+EXPERIMENT_MODE = "ablation"
+# Options:
+# "full"
+# "ablation"
+MACRO_BETA_MIN = 0.2
+MACRO_BETA_MAX = 0.8
+MACRO_PCR = 0.2
+MACRO_MAHAL_Q = 0.68
 
 AVAILABLE_BENCHMARKS = {
 
@@ -79,6 +87,7 @@ CHART_CMAP = "tab20"
 @dataclass
 class Paths:
     exp_tag: str
+    mode: str
     fig_dir: str
     res_dir: str
     cache_dir: str
@@ -87,14 +96,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=5, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=626, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     parser.add_argument("--reuse-cache", action="store_true", help="Reuse cache if available")
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
     parser.add_argument("--functions", nargs="+", default=["ALL"], help="Functions to execute")
     parser.add_argument("--dims", type=int, default=30, help="Problem dimensions")
     parser.add_argument("--optimizers", nargs="+", default=None, help="List of optimizers")
-    parser.add_argument("--experiment-mode", default="full", choices=["full", "ablation"], help="Experiment optimizer set")
+    parser.add_argument("--experiment-mode", default=EXPERIMENT_MODE, choices=["full", "ablation"], help="Experiment mode")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Maximum optimization iterations")
     parser.add_argument("--pop-size", type=int, default=50, help="Population size")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Independent runs per optimizer")
@@ -102,22 +111,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Execute runs in parallel")
     parser.add_argument("--n-workers", type=int, default=None, help="Number of parallel workers")
     parser.add_argument("--convergence-extra-scale", default="none", choices=["none", "auto", "log", "symlog", "exp"], help="Save an additional convergence plot with the selected y-axis scale or transformation")
-    parser.add_argument("--dsade-beta-min", type=float, default=0.2, help="Minimum adaptive beta")
-    parser.add_argument("--dsade-beta-max", type=float, default=0.8, help="Maximum adaptive beta")
-    parser.add_argument("--dsade-pcr", type=float, default=0.2, help="Crossover probability")
-    parser.add_argument("--dsade-mahal-q", type=float, default=0.68, help="Mahalanobis threshold")
+    parser.add_argument("--macro-beta-min", dest="macro_beta_min", type=float, default=MACRO_BETA_MIN, help="Minimum MaCRO-DE beta")
+    parser.add_argument("--macro-beta-max", dest="macro_beta_max", type=float, default=MACRO_BETA_MAX, help="Maximum MaCRO-DE beta")
+    parser.add_argument("--macro-pcr", dest="macro_pcr", type=float, default=MACRO_PCR, help="MaCRO-DE crossover probability")
+    parser.add_argument("--macro-mahal-q", dest="macro_mahal_q", type=float, default=MACRO_MAHAL_Q, help="MaCRO-DE Mahalanobis threshold")
+    parser.add_argument("--dsade-beta-min", dest="macro_beta_min", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument("--dsade-beta-max", dest="macro_beta_max", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument("--dsade-pcr", dest="macro_pcr", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument("--dsade-mahal-q", dest="macro_mahal_q", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    if args.experiment_mode == "ablation":
-        args.optimizers = list(ABLATION_OPTIMIZERS)
-    elif args.optimizers is None:
-        args.optimizers = list(DEFAULT_OPTIMIZERS)
 
     if args.n_workers is None:
         available_workers = max(1, (os.cpu_count() or 1) - 1)
         args.n_workers = min(available_workers, max(1, args.runs))
 
     return args
+
+def apply_experiment_mode(args):
+
+    args.experiment_mode = str(args.experiment_mode).lower()
+
+    if args.experiment_mode == "ablation":
+        args.optimizers = list(ABLATION_OPTIMIZERS)
+    elif args.optimizers is None:
+        args.optimizers = list(DEFAULT_OPTIMIZERS)
 
 def make_paths(args):
 
@@ -126,12 +143,14 @@ def make_paths(args):
         args.output_root,
         "Figures",
         exp_tag,
+        args.experiment_mode,
     )
 
     res_dir = os.path.join(
         args.output_root,
         "Results",
         exp_tag,
+        args.experiment_mode,
     )
 
     cache_dir = os.path.join(
@@ -151,10 +170,11 @@ def make_paths(args):
         )
 
     return Paths(
-        exp_tag,
-        fig_dir,
-        res_dir,
-        cache_dir,
+        exp_tag=exp_tag,
+        mode=args.experiment_mode,
+        fig_dir=fig_dir,
+        res_dir=res_dir,
+        cache_dir=cache_dir,
     )
 
 def discover_benchmark_functions(
@@ -301,10 +321,10 @@ def optimizer_init_kwargs(
         return optimizer_kwargs
 
     custom_kwargs = {
-        "beta_min": args.dsade_beta_min,
-        "beta_max": args.dsade_beta_max,
-        "pcr": args.dsade_pcr,
-        "mahalanobis_q": args.dsade_mahal_q,
+        "beta_min": args.macro_beta_min,
+        "beta_max": args.macro_beta_max,
+        "pcr": args.macro_pcr,
+        "mahalanobis_q": args.macro_mahal_q,
     }
     init_params = inspect.signature(
         optimizer_class.__init__
@@ -345,6 +365,7 @@ def build_problem(
 def build_cache_signature(args):
 
     payload = {
+        "experiment_mode": args.experiment_mode,
         "benchmark": args.benchmark,
         "functions": args.functions,
         "optimizers": args.optimizers,
@@ -352,6 +373,10 @@ def build_cache_signature(args):
         "epochs": args.epochs,
         "pop_size": args.pop_size,
         "runs": args.runs,
+        "macro_beta_min": args.macro_beta_min,
+        "macro_beta_max": args.macro_beta_max,
+        "macro_pcr": args.macro_pcr,
+        "macro_mahal_q": args.macro_mahal_q,
     }
 
     return hashlib.sha1(
@@ -728,6 +753,7 @@ def export_results(
 def main():
 
     args = parse_args()
+    apply_experiment_mode(args)
     logging.disable(logging.INFO)
     paths = make_paths(args)
     cache_signature = build_cache_signature(args)
@@ -756,6 +782,9 @@ def main():
     print("=" * 60)
     print(
         f"Experiment     : {paths.exp_tag}"
+    )
+    print(
+        f"Mode           : {args.experiment_mode}"
     )
     print(
         f"Benchmark      : {args.benchmark}"
@@ -1046,9 +1075,10 @@ def main():
                 optimizer_colors,
             )
 
+    mode_label = args.experiment_mode.capitalize()
     excel_path = os.path.join(
         paths.res_dir,
-        f"Global_Results_{paths.exp_tag}.xlsx",
+        f"Global_Results_{paths.exp_tag}_{mode_label}.xlsx",
     )
 
     export_results(
