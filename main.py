@@ -56,6 +56,13 @@ DEFAULT_OPTIMIZERS = [
     "SHADE",
     "WOA",
 ]
+ABLATION_OPTIMIZERS = [
+    "DE",
+    "DE-M",
+    "DE-MC",
+    "DE-MC-CF",
+    "MaCRO-DE",
+]
 
 CHART_CMAP = "tab20"
 
@@ -86,7 +93,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
     parser.add_argument("--functions", nargs="+", default=["ALL"], help="Functions to execute")
     parser.add_argument("--dims", type=int, default=30, help="Problem dimensions")
-    parser.add_argument("--optimizers", nargs="+", default=list(DEFAULT_OPTIMIZERS), help="List of optimizers")
+    parser.add_argument("--optimizers", nargs="+", default=None, help="List of optimizers")
+    parser.add_argument("--experiment-mode", default="full", choices=["full", "ablation"], help="Experiment optimizer set")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Maximum optimization iterations")
     parser.add_argument("--pop-size", type=int, default=50, help="Population size")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Independent runs per optimizer")
@@ -99,6 +107,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-pcr", type=float, default=0.2, help="Crossover probability")
     parser.add_argument("--dsade-mahal-q", type=float, default=0.68, help="Mahalanobis threshold")
     args = parser.parse_args()
+
+    if args.experiment_mode == "ablation":
+        args.optimizers = list(ABLATION_OPTIMIZERS)
+    elif args.optimizers is None:
+        args.optimizers = list(DEFAULT_OPTIMIZERS)
 
     if args.n_workers is None:
         available_workers = max(1, (os.cpu_count() or 1) - 1)

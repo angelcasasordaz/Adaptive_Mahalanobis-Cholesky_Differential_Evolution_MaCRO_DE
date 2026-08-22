@@ -10,6 +10,9 @@ from dbo_optimizer import DBOOptimizer
 from de_awad_optimizer import DE_AWAD
 from de_diversity_selection_optimizer import DE_DiversitySelection
 from de_mahalanobis_optimizer import DE_Mahalanobis
+from de_m_optimizer import DE_M
+from de_mc_cf_optimizer import DE_MC_CF
+from de_mc_optimizer import DE_MC
 from dsade_awad_optimizer import DSADE_AWAD
 from dsade_optimizer import DSADE
 from macro_de_optimizer import MaCRO_DE
@@ -30,6 +33,9 @@ CUSTOM_OPTIMIZER_CLASSES = {
     "DE_AWAD": DE_AWAD,
     "DE_DiversitySelection": DE_DiversitySelection,
     "DE_Mahalanobis": DE_Mahalanobis,
+    "DE-M": DE_M,
+    "DE-MC": DE_MC,
+    "DE-MC-CF": DE_MC_CF,
 }
 CUSTOM_OPTIMIZERS = tuple(CUSTOM_OPTIMIZER_CLASSES)
 
@@ -49,6 +55,12 @@ CUSTOM_OPTIMIZER_ALIASES = {
     "DE_DIVERSITYSELECTION": "DE_DiversitySelection",
     "DE-MAHALANOBIS": "DE_Mahalanobis",
     "DE_MAHALANOBIS": "DE_Mahalanobis",
+    "DE-M": "DE-M",
+    "DE_M": "DE-M",
+    "DE-MC": "DE-MC",
+    "DE_MC": "DE-MC",
+    "DE-MC-CF": "DE-MC-CF",
+    "DE_MC_CF": "DE-MC-CF",
 }
 
 MEALPY_OPTIMIZER_ALIASES = {
