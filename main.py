@@ -33,6 +33,7 @@ from compute_backend import (
     parse_gpu_batch_size,
     performance_batch_candidates,
     resolve_gpu_batch_size,
+    resolve_cpu_workers,
     resolve_objective_workers,
     validate_memory_fraction,
 )
@@ -42,12 +43,12 @@ from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
 COMPUTE_DEVICE = "hybrid"
-CPU_WORKERS = None  # Auto: min(runs, logical CPUs minus one).
+CPU_WORKERS = None  # Auto-reserve CPU capacity for the OS/user.
 GPU_WORKERS = 1
 GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
-EXPERIMENT_MODE = "ablation"
+EXPERIMENT_MODE = "full"
 # Options:
 # "full"
 # "ablation"
@@ -128,7 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=627, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=628, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
@@ -155,7 +156,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-base", type=int, default=1234, help="Base random seed")
     parser.add_argument("--parallel", default="yes", choices=["yes", "no"], help="Execute runs in parallel")
     parser.add_argument("--compute-device", default=COMPUTE_DEVICE, choices=["cpu", "gpu", "hybrid"], help="Numerical backend for supported custom optimizers")
-    parser.add_argument("--n-workers", type=int, default=CPU_WORKERS, help="Number of CPU process workers")
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=CPU_WORKERS,
+        help="CPU process workers (default: auto; reserves about one third of logical CPUs)",
+    )
     parser.add_argument("--gpu-workers", type=int, default=GPU_WORKERS, help="CUDA-owning controller processes (must be 1)")
     parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION, help="Maximum fraction of total VRAM available to CuPy's memory pool")
     parser.add_argument("--gpu-batch-size", default=GPU_BATCH_SIZE, help="GPU population batch capacity: auto or a positive integer")
@@ -196,9 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dsade-mahal-q", dest="macro_mahal_q", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if args.n_workers is None:
-        available_workers = max(1, (os.cpu_count() or 1) - 1)
-        args.n_workers = min(available_workers, max(1, args.runs))
+    args.n_workers = resolve_cpu_workers(args.n_workers)
 
     args.compute_device = normalize_compute_device(args.compute_device)
     try:
@@ -1925,13 +1929,14 @@ def main():
                             "metadata": metadata,
                         })
 
+                    active_cpu_workers = min(args.n_workers, len(tasks))
                     print_status(
                         f"SUBMITTED | function={function_name} | "
                         f"optimizer={optimizer_name} | "
-                        f"runs={len(tasks)} | workers={args.n_workers}"
+                        f"runs={len(tasks)} | workers={active_cpu_workers}"
                     )
 
-                    executor_kwargs = {"max_workers": args.n_workers}
+                    executor_kwargs = {"max_workers": active_cpu_workers}
                     if args.compute_device in GPU_MODES:
                         # CUDA was initialized in the controller. Spawn avoids
                         # inheriting that context into CPU-only child processes.

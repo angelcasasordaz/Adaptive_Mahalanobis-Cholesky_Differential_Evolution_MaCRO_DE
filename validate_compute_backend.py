@@ -12,6 +12,7 @@ from compute_backend import (
     estimate_effective_batch_size,
     initialize_gpu,
     parse_gpu_batch_size,
+    resolve_cpu_workers,
     resolve_gpu_batch_size,
     resolve_objective_workers,
 )
@@ -42,6 +43,9 @@ def main():
     assert resolve_gpu_batch_size("auto", 8, 3) == 3
     assert resolve_gpu_batch_size(4, 8, 30) == 4
     assert resolve_gpu_batch_size(12, 8, 30) == 8
+    assert resolve_cpu_workers(None, 12) == 8
+    assert resolve_cpu_workers(None, 8) == 6
+    assert resolve_cpu_workers(3, 12) == 3
     workers = resolve_objective_workers(None, 15)
     assert workers >= 1
     assert estimate_effective_batch_size(30, 30, 50, 30, workers) in {1, 2, 4, 8, 16, 30}

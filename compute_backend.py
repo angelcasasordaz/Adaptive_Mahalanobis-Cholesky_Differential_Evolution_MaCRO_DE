@@ -83,6 +83,23 @@ def resolve_gpu_batch_size(requested: Any, estimated_capacity: int, pending_runs
     return max(1, min(requested_limit, estimated_capacity, pending_runs))
 
 
+def resolve_cpu_workers(requested: int | None, logical_cpus: int | None = None) -> int:
+    """Leave a useful share of the machine available unless explicitly overridden.
+
+    The automatic policy reserves at least two logical CPUs and roughly one
+    third of larger machines.  Integer rounding intentionally gives 8 -> 6
+    and 12 -> 8 workers.  An explicit command-line value remains authoritative.
+    """
+    detected = logical_cpus if logical_cpus is not None else (os.cpu_count() or 1)
+    logical = max(1, int(detected))
+    if requested is not None:
+        return max(1, int(requested))
+    if logical == 1:
+        return 1
+    reserved = max(2, logical // 3)
+    return max(1, logical - reserved)
+
+
 def resolve_objective_workers(requested: int | None, cpu_worker_limit: int) -> int:
     """Use physical-core-like concurrency and avoid nested BLAS oversubscription."""
     logical = max(1, os.cpu_count() or 1)
