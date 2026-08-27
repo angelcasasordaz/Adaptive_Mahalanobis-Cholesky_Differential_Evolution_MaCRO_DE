@@ -1,8 +1,9 @@
+# Reproducible Linux + NVIDIA environment (Python 3.11).
 mafese==1.0.0
 mealpy==3.0.2
 opfunu==1.0.1
 
-numpy==1.26.4
+numpy==2.2.6
 scipy==1.13.1
 pandas==2.2.2
 
@@ -14,3 +15,6 @@ openpyxl==3.1.5
 permetrics==2.0.0
 tqdm==4.67.1
 setuptools==80.9.0
+
+# The ctk extra lets CuPy resolve its CUDA runtime/toolkit Python dependencies.
+cupy-cuda13x[ctk]==14.2.0

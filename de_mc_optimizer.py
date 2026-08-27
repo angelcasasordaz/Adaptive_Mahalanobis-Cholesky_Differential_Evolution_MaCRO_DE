@@ -4,7 +4,7 @@ from de_ablation_base import MahalanobisDEBase
 
 
 class DE_MC(MahalanobisDEBase):
-    """DE-M with Cholesky-based covariance inverse."""
+    """DE-M with Cholesky-solve Mahalanobis distances."""
 
     def _covariance_inverse(self, sigma):
         n_dims = self.problem.n_dims
@@ -22,3 +22,7 @@ class DE_MC(MahalanobisDEBase):
         if self._valid_candidates(close, current_idx).size >= 3:
             return close
         return np.arange(self.pop_size)
+
+    @property
+    def covariance_inverse_method(self):
+        return "cholesky_solve"

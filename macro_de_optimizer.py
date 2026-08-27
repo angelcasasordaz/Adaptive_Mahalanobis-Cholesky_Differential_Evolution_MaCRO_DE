@@ -3,6 +3,9 @@ from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
+from compute_backend import ComputeBackend
+
+
 class MaCRO_DE(Optimizer):
     """
     Diversity-based Self-Adaptive Control in Differential Evolution (DSADE)
@@ -19,6 +22,7 @@ class MaCRO_DE(Optimizer):
         beta_max=0.8,
         pcr=0.2,
         mahalanobis_q=0.68,
+        compute_device="cpu",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -28,10 +32,12 @@ class MaCRO_DE(Optimizer):
         self.beta_max = self.validator.check_float("beta_max", beta_max, (0.0, 2.0))
         self.pcr = self.validator.check_float("pcr", pcr, (0.0, 1.0))
         self.mahalanobis_q = self.validator.check_float("mahalanobis_q", mahalanobis_q, (0.0, 1.0))
+        self.compute_device = compute_device
+        self.backend = ComputeBackend(compute_device)
         if self.beta_min > self.beta_max:
             raise ValueError("beta_min debe ser <= beta_max.")
         self.set_parameters(
-            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q"]
+            ["epoch", "pop_size", "beta_min", "beta_max", "pcr", "mahalanobis_q", "compute_device"]
         )
         self.sort_flag = False
         self.support_parallel_modes = True
@@ -116,16 +122,18 @@ class MaCRO_DE(Optimizer):
 
     def _mutation_pool(self, pop_pos, div_norm_used):
         n_dims = self.problem.n_dims
-        mu = np.mean(pop_pos, axis=0)
-        sigma_inv = self._safe_cov_inv(pop_pos)
-        d = pop_pos - mu
-        dist2 = np.sum((d @ sigma_inv) * d, axis=1)
         thr = self.mahalanobis_threshold
         if thr is None:
             thr = float(chi2.ppf(self.mahalanobis_q, max(n_dims, 1)))
-        close_mask = dist2 <= thr
-        close_particles = pop_pos[close_mask]
-        far_particles = pop_pos[~close_mask]
+        close, far = self.backend.close_far_indices(
+            pop_pos,
+            n_dims,
+            thr,
+            "cholesky",
+            include_distances=False,
+        )
+        close_particles = pop_pos[close]
+        far_particles = pop_pos[far]
 
         if div_norm_used >= 0.5 and close_particles.shape[0] >= 3:
             return close_particles

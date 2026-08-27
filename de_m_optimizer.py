@@ -17,3 +17,7 @@ class DE_M(MahalanobisDEBase):
         if self._valid_candidates(close, current_idx).size >= 3:
             return close
         return np.arange(self.pop_size)
+
+    @property
+    def covariance_inverse_method(self):
+        return "direct"

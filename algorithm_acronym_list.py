@@ -38,6 +38,7 @@ CUSTOM_OPTIMIZER_CLASSES = {
     "DE-MC-CF": DE_MC_CF,
 }
 CUSTOM_OPTIMIZERS = tuple(CUSTOM_OPTIMIZER_CLASSES)
+GPU_BATCHED_CUSTOM_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE"})
 
 CUSTOM_OPTIMIZER_ALIASES = {
     "MACRO-DE": "MaCRO-DE",
@@ -190,6 +191,11 @@ def optimizer_class(name: str):
 
 def is_custom_optimizer(name: str) -> bool:
     return resolve_optimizer_name(name) in CUSTOM_OPTIMIZERS
+
+
+def supports_gpu_batching(name: str) -> bool:
+    """Whether the custom optimizer has the independent-run tensor engine."""
+    return resolve_optimizer_name(name) in GPU_BATCHED_CUSTOM_OPTIMIZERS
 
 
 def list_available_optimizers() -> str:

@@ -3,6 +3,8 @@ from mealpy.optimizer import Optimizer
 from mealpy.utils.agent import Agent
 from scipy.stats import chi2
 
+from compute_backend import ComputeBackend
+
 
 class MahalanobisDEBase(Optimizer):
     """Shared DE/rand/1/bin mechanics for MaCRO-DE ablation variants."""
@@ -14,6 +16,7 @@ class MahalanobisDEBase(Optimizer):
         wf=0.5,
         cr=0.9,
         mahalanobis_q=0.68,
+        compute_device="cpu",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -26,7 +29,12 @@ class MahalanobisDEBase(Optimizer):
             mahalanobis_q,
             (0.0, 1.0),
         )
-        self.set_parameters(["epoch", "pop_size", "wf", "cr", "mahalanobis_q"])
+        self.compute_device = compute_device
+        self.backend = ComputeBackend(compute_device)
+        self._epoch_pop_pos = None
+        self._epoch_close = None
+        self._epoch_far = None
+        self.set_parameters(["epoch", "pop_size", "wf", "cr", "mahalanobis_q", "compute_device"])
         self.sort_flag = False
         self.support_parallel_modes = True
 
@@ -46,20 +54,35 @@ class MahalanobisDEBase(Optimizer):
         raise NotImplementedError
 
     def _mahalanobis_dist2(self, pop_pos):
-        n_dims = self.problem.n_dims
-        mu = np.mean(pop_pos, axis=0)
-        sigma = self._covariance_matrix(pop_pos)
-        sigma_inv = self._covariance_inverse(sigma)
-        diff = pop_pos - mu
-        return np.sum((diff @ sigma_inv) * diff, axis=1)
+        _, _, dist2 = self.backend.mahalanobis_cpu(
+            pop_pos,
+            self.problem.n_dims,
+            self.covariance_inverse_method,
+        )
+        return dist2
+
+    @property
+    def covariance_inverse_method(self):
+        raise NotImplementedError
 
     def _mahalanobis_threshold(self):
-        return chi2.ppf(0.68, self.problem.n_dims)
+        return chi2.ppf(self.mahalanobis_q, self.problem.n_dims)
 
     def _close_indices(self, pop_pos):
-        dist2 = self._mahalanobis_dist2(pop_pos)
+        close, _ = self._close_far_indices(pop_pos)
+        return close
+
+    def _close_far_indices(self, pop_pos):
+        if pop_pos is self._epoch_pop_pos and self._epoch_close is not None:
+            return self._epoch_close, self._epoch_far
         threshold = self._mahalanobis_threshold()
-        return np.flatnonzero(dist2 <= threshold)
+        return self.backend.close_far_indices(
+            pop_pos,
+            self.problem.n_dims,
+            threshold,
+            self.covariance_inverse_method,
+            include_distances=False,
+        )
 
     def _mutation_pool_indices(self, pop_pos, current_idx):
         raise NotImplementedError
@@ -90,6 +113,10 @@ class MahalanobisDEBase(Optimizer):
 
     def evolve(self, epoch):
         pop_pos = self._positions(self.pop)
+        # The population is fixed throughout this DE generation. Compute the
+        # covariance/classification kernel once and return only compact indices.
+        self._epoch_pop_pos = pop_pos
+        self._epoch_close, self._epoch_far = self._close_far_indices(pop_pos)
         pop_new = []
 
         for idx in range(self.pop_size):
@@ -117,3 +144,6 @@ class MahalanobisDEBase(Optimizer):
                 pop_new,
                 self.problem.minmax,
             )
+        self._epoch_pop_pos = None
+        self._epoch_close = None
+        self._epoch_far = None
