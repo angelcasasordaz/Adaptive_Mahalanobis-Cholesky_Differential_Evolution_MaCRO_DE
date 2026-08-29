@@ -48,10 +48,10 @@ GPU_WORKERS = 1
 GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
-EXPERIMENT_MODE = "full"
-# Options:
-# "full"
-# "ablation"
+EXPERIMENT_MODES = [
+    "full",
+    "ablation",
+]
 MACRO_BETA_MIN = 0.2
 MACRO_BETA_MAX = 0.8
 MACRO_PCR = 0.2
@@ -149,7 +149,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--functions", nargs="+", default=["ALL"], help="Functions to execute")
     parser.add_argument("--dims", type=int, default=30, help="Problem dimensions")
     parser.add_argument("--optimizers", nargs="+", default=None, help="List of optimizers")
-    parser.add_argument("--experiment-mode", default=EXPERIMENT_MODE, choices=["full", "ablation"], help="Experiment mode")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--experiment-modes",
+        nargs="+",
+        choices=["full", "ablation"],
+        default=None,
+        help="Experiment modes to execute sequentially (default: EXPERIMENT_MODES)",
+    )
+    mode_group.add_argument(
+        "--experiment-mode",
+        choices=["full", "ablation"],
+        default=None,
+        help="Execute one experiment mode (backward-compatible alias)",
+    )
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Maximum optimization iterations")
     parser.add_argument("--pop-size", type=int, default=50, help="Population size")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="Independent runs per optimizer")
@@ -162,7 +175,12 @@ def parse_args() -> argparse.Namespace:
         default=CPU_WORKERS,
         help="CPU process workers (default: auto; reserves about one third of logical CPUs)",
     )
-    parser.add_argument("--gpu-workers", type=int, default=GPU_WORKERS, help="CUDA-owning controller processes (must be 1)")
+    parser.add_argument(
+        "--gpu-workers",
+        type=int,
+        default=GPU_WORKERS,
+        help="Strict-GPU CUDA-owning run workers (currently capped at 1)",
+    )
     parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION, help="Maximum fraction of total VRAM available to CuPy's memory pool")
     parser.add_argument("--gpu-batch-size", default=GPU_BATCH_SIZE, help="GPU population batch capacity: auto or a positive integer")
     parser.add_argument("--objective-workers", type=int, default=None, help="Persistent CPU objective workers; default approximates physical cores")
@@ -219,16 +237,25 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gpu-calibration-epochs must be between 1 and 5")
     if args.cec_gpu_verification_points < 100:
         parser.error("--cec-gpu-verification-points must be at least 100")
-    if args.gpu_workers != 1:
-        parser.error("--gpu-workers must be 1; this project currently targets one NVIDIA GPU")
+    if args.gpu_workers < 1:
+        parser.error("--gpu-workers must be at least 1")
     if args.overlap_diagnostic_run < 1:
         parser.error("--overlap-diagnostic-run must be at least 1")
+    args.experiment_modes = (
+        [args.experiment_mode]
+        if args.experiment_mode is not None
+        else (
+            list(args.experiment_modes)
+            if args.experiment_modes is not None
+            else list(EXPERIMENT_MODES)
+        )
+    )
 
     return args
 
-def apply_experiment_mode(args):
+def apply_experiment_mode(args, experiment_mode):
 
-    args.experiment_mode = str(args.experiment_mode).lower()
+    args.experiment_mode = str(experiment_mode).lower()
 
     if args.experiment_mode == "ablation":
         args.optimizers = list(ABLATION_OPTIMIZERS)
@@ -535,7 +562,6 @@ def build_cache_signature(args):
         "macro_pcr": args.macro_pcr,
         "macro_mahal_q": args.macro_mahal_q,
     }
-
     return hashlib.sha1(
 
         json.dumps(
@@ -864,6 +890,108 @@ def print_status(message):
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}",
         flush=True,
     )
+
+
+def initialize_strict_gpu_worker(memory_fraction):
+    """Create one persistent, process-local CUDA context."""
+    logging.disable(logging.INFO)
+    initialize_gpu(memory_fraction=memory_fraction)
+    print_status(
+        f"STRICT GPU WORKER READY | pid={os.getpid()} | "
+        f"memory_fraction={memory_fraction:.3f} | objective_workers=0"
+    )
+
+
+def select_strict_gpu_workers(args, gpu_info):
+    """Cap strict-GPU execution at one persistent CUDA-owning worker."""
+    return 1
+
+
+def strict_gpu_worker_args(args):
+    """Remove controller CUDA objects before crossing the spawn boundary."""
+    worker_args = argparse.Namespace(**vars(args))
+    worker_args.gpu_objectives = {}
+    worker_args.gpu_objective_reports = {}
+    worker_args.vectorized_cpu_objectives = {}
+    return worker_args
+
+
+def run_strict_gpu_task(task):
+    """Execute complete GPU batches locally in the CUDA-owning spawned worker."""
+    worker_args = task["args"]
+    function_name = task["function_name"]
+    optimizer_name = task["optimizer_name"]
+    run_indices = task["run_indices"]
+    initialize_verified_gpu_objectives(worker_args, [function_name])
+    active_batch_size = min(task["active_batch_size"], len(run_indices))
+    if worker_args.gpu_batch_size == "auto" and worker_args.gpu_auto_calibration == "yes":
+        active_batch_size, _ = calibrate_gpu_batch_size(
+            function_name,
+            optimizer_name,
+            worker_args,
+            min(worker_args.estimated_gpu_batch_capacity, len(run_indices)),
+            None,
+        )
+    completed = execute_gpu_batches(
+        function_name,
+        optimizer_name,
+        worker_args,
+        run_indices,
+        task["checkpoint_records"],
+        objective_executor=None,
+        active_batch_size=active_batch_size,
+    )
+    return os.getpid(), completed
+
+
+def execute_strict_gpu_pool(
+    executor,
+    function_name,
+    optimizer_name,
+    args,
+    pending_runs,
+    checkpoint_records,
+):
+    """Distribute run groups across persistent local-CUDA workers."""
+    active_workers = min(args.gpu_workers, len(pending_runs))
+    run_groups = [
+        [int(run) for run in group]
+        for group in np.array_split(np.asarray(pending_runs, dtype=int), active_workers)
+        if len(group)
+    ]
+    worker_args = strict_gpu_worker_args(args)
+    futures = []
+    for run_indices in run_groups:
+        futures.append(executor.submit(
+            run_strict_gpu_task,
+            {
+                "function_name": function_name,
+                "optimizer_name": optimizer_name,
+                "args": worker_args,
+                "run_indices": run_indices,
+                "checkpoint_records": {
+                    run: checkpoint_records[run]
+                    for run in run_indices
+                },
+                "active_batch_size": min(args.resolved_gpu_batch_size, len(run_indices)),
+            },
+        ))
+    completed = []
+    worker_pids = set()
+    for future in as_completed(futures):
+        worker_pid, outputs = future.result()
+        worker_pids.add(worker_pid)
+        completed.extend(outputs)
+        print_status(
+            f"STRICT GPU WORKER COMPLETE | pid={worker_pid} | "
+            f"function={function_name} | optimizer={optimizer_name} | "
+            f"completed_runs={len(completed)}/{len(pending_runs)}"
+        )
+    if active_workers > 1 and len(worker_pids) != active_workers:
+        raise RuntimeError(
+            f"strict GPU pool used {len(worker_pids)}/{active_workers} selected workers"
+        )
+    return completed
 
 def run_single(
     function_name,
@@ -1618,21 +1746,35 @@ def export_results(
 
     return df
 
-def main():
+def run_experiment(args):
 
-    args = parse_args()
-    apply_experiment_mode(args)
-    if args.overlap_diagnostic_function is not None:
-        run_overlap_diagnostic(args)
-        return
+    if args.compute_device == "gpu" and args.objective_evaluation == "process":
+        raise ValueError(
+            'Strict GPU RAM-safe mode supports objective_evaluation="auto" '
+            'or "serial" only; "process" would create nested CPU worker processes.'
+        )
+    if args.compute_device == "gpu" and args.gpu_workers > 1:
+        print(
+            f"Strict GPU RAM-safe limit: requested {args.gpu_workers}, using 1",
+            flush=True,
+        )
+
     gpu_info = None
+    strict_gpu_executor = None
     args.resolved_gpu_batch_size = 1
     args.estimated_gpu_batch_capacity = 1
     if args.compute_device in GPU_MODES:
         gpu_info = initialize_gpu(memory_fraction=args.gpu_memory_fraction)
+        if args.compute_device == "gpu":
+            args.gpu_workers = select_strict_gpu_workers(args, gpu_info)
+            per_worker_memory_fraction = args.gpu_memory_fraction / args.gpu_workers
+        else:
+            per_worker_memory_fraction = args.gpu_memory_fraction
         memory_budget = min(
-            gpu_info.free_memory_bytes,
-            gpu_info.memory_limit_bytes,
+            gpu_info.free_memory_bytes // args.gpu_workers
+            if args.compute_device == "gpu"
+            else gpu_info.free_memory_bytes,
+            int(gpu_info.total_memory_bytes * per_worker_memory_fraction),
         )
         memory_capacity = estimate_population_batch_size(
             args.pop_size,
@@ -1676,7 +1818,14 @@ def main():
 
         selected_functions = args.functions
 
-    initialize_verified_gpu_objectives(args, selected_functions)
+    if args.compute_device == "gpu":
+        # Strict-GPU objectives are constructed only after spawn, beside the
+        # worker's local CUDA context.  No CuPy object crosses this boundary.
+        args.gpu_objectives = {}
+        args.gpu_objective_reports = {}
+        args.vectorized_cpu_objectives = {}
+    else:
+        initialize_verified_gpu_objectives(args, selected_functions)
 
     print("=" * 60)
     print(
@@ -1722,6 +1871,14 @@ def main():
     )
     if gpu_info is not None:
         print(f"GPU workers    : {args.gpu_workers}")
+        if args.compute_device == "gpu":
+            print("Strict GPU execution path: local persistent CUDA worker")
+            print("GPU run workers selected: 1")
+            print("Host RAM safety: enabled")
+            print(
+                "Per-worker GPU memory cap: "
+                f"{args.gpu_memory_fraction / args.gpu_workers:.1%}"
+            )
         print(f"GPU            : {gpu_info.name}")
         print(f"CuPy           : {gpu_info.cupy_version}")
         print(f"GPU memory     : {gpu_info.total_memory_bytes / 1024**3:.2f} GB")
@@ -1738,23 +1895,27 @@ def main():
         print("Batch policy            : performance-aware")
         print(f"Objective workers       : {args.objective_workers}")
         print(f"Objective evaluation    : {args.objective_evaluation.upper()}")
-        verified_names = sorted(args.gpu_objectives)
-        fallback_names = [name for name in selected_functions if name not in args.gpu_objectives]
-        print(
-            f"GPU objectives verified : {len(verified_names)}/{len(selected_functions)}"
-        )
-        print(
-            "GPU objective functions  : "
-            + (", ".join(verified_names) if verified_names else "NONE")
-        )
-        print(
-            "CPU objective fallback   : "
-            + (", ".join(fallback_names) if fallback_names else "NONE")
-        )
-        print(
-            f"Vectorized CPU CEC      : {len(args.vectorized_cpu_objectives)}/"
-            f"{len(selected_functions)}"
-        )
+        if args.compute_device == "gpu":
+            print("GPU objective verification: worker-local")
+            print("CPU objective fallback     : worker-local, unchanged")
+        else:
+            verified_names = sorted(args.gpu_objectives)
+            fallback_names = [name for name in selected_functions if name not in args.gpu_objectives]
+            print(
+                f"GPU objectives verified : {len(verified_names)}/{len(selected_functions)}"
+            )
+            print(
+                "GPU objective functions  : "
+                + (", ".join(verified_names) if verified_names else "NONE")
+            )
+            print(
+                "CPU objective fallback   : "
+                + (", ".join(fallback_names) if fallback_names else "NONE")
+            )
+            print(
+                f"Vectorized CPU CEC      : {len(args.vectorized_cpu_objectives)}/"
+                f"{len(selected_functions)}"
+            )
     print(
         f"Extra scale    : {args.convergence_extra_scale}"
     )
@@ -1764,7 +1925,7 @@ def main():
 
     objective_executor = None
     if (
-        args.compute_device in GPU_MODES
+        args.compute_device == "hybrid"
         and args.objective_workers > 1
         and args.objective_evaluation != "serial"
     ):
@@ -1773,9 +1934,17 @@ def main():
             mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize_objective_worker,
         )
+    if args.compute_device == "gpu":
+        strict_gpu_executor = ProcessPoolExecutor(
+            max_workers=args.gpu_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=initialize_strict_gpu_worker,
+            initargs=(args.gpu_memory_fraction,),
+        )
 
     results_struct = {}
     optimizer_failures = []
+    mode_had_pending_runs = False
 
     for function_index, function_name in enumerate(
         selected_functions,
@@ -1871,6 +2040,9 @@ def main():
                             f"run={run + 1}/{args.runs}"
                         )
 
+                if pending_runs:
+                    mode_had_pending_runs = True
+
                 if len(pending_runs) == 0:
                     print_status(
                         f"CACHE COMPLETE | function={function_name} | "
@@ -1878,7 +2050,27 @@ def main():
                         f"runs={args.runs}/{args.runs}"
                     )
 
-                if pending_runs and optimizer_uses_gpu(optimizer_name, args.compute_device):
+                if (
+                    pending_runs
+                    and args.compute_device == "gpu"
+                    and optimizer_uses_gpu(optimizer_name, args.compute_device)
+                ):
+                    print_status(
+                        f"STRICT GPU POOL | function={function_name} | "
+                        f"optimizer={optimizer_name} | pending_runs={len(pending_runs)} | "
+                        f"gpu_workers={min(args.gpu_workers, len(pending_runs))}"
+                    )
+                    completed.extend(
+                        execute_strict_gpu_pool(
+                            strict_gpu_executor,
+                            function_name,
+                            optimizer_name,
+                            args,
+                            pending_runs,
+                            checkpoint_records,
+                        )
+                    )
+                elif pending_runs and optimizer_uses_gpu(optimizer_name, args.compute_device):
                     actual_batch_size = min(args.resolved_gpu_batch_size, len(pending_runs))
                     if args.gpu_batch_size == "auto" and args.gpu_auto_calibration == "yes":
                         actual_batch_size, _ = calibrate_gpu_batch_size(
@@ -1907,6 +2099,7 @@ def main():
                 elif (
                     args.parallel == "yes"
                     and len(pending_runs) > 1
+                    and args.compute_device != "gpu"
                     and not optimizer_uses_gpu(optimizer_name, args.compute_device)
                 ):
 
@@ -2103,6 +2296,8 @@ def main():
 
     if objective_executor is not None:
         objective_executor.shutdown(wait=True)
+    if strict_gpu_executor is not None:
+        strict_gpu_executor.shutdown(wait=True)
 
     mode_label = args.experiment_mode.capitalize()
     excel_path = os.path.join(
@@ -2130,6 +2325,35 @@ def main():
     print("=" * 60)
     print(f"Figures: {paths.fig_dir}")
     print(f"Results: {paths.res_dir}")
+    if args.reuse_cache and not mode_had_pending_runs:
+        print_status(
+            f"CACHE MODE COMPLETE | mode={args.experiment_mode} | "
+            "all optimization runs reused"
+        )
+
+def experiment_configurations(args):
+
+    for experiment_mode in args.experiment_modes:
+        mode_args = argparse.Namespace(**vars(args))
+        apply_experiment_mode(mode_args, experiment_mode)
+        yield mode_args
+
+def main():
+
+    args = parse_args()
+    if args.overlap_diagnostic_function is not None:
+        diagnostic_args = argparse.Namespace(**vars(args))
+        apply_experiment_mode(diagnostic_args, args.experiment_modes[0])
+        run_overlap_diagnostic(diagnostic_args)
+        return
+
+    configurations = list(experiment_configurations(args))
+    for config_index, mode_args in enumerate(configurations, start=1):
+        print_status(
+            f"EXPERIMENT CONFIGURATION {config_index}/{len(configurations)} | "
+            f"mode={mode_args.experiment_mode}"
+        )
+        run_experiment(mode_args)
 
 if __name__ == "__main__":
 
