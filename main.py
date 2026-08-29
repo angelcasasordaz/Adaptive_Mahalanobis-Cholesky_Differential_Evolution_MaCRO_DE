@@ -38,6 +38,11 @@ from compute_backend import (
     validate_memory_fraction,
 )
 from gpu_batching import BATCH_ENGINE_VERSION, BatchedDEEngine
+from mealpy_gpu_adapters import (
+    configure_local_mealpy_gpu_backend,
+    mealpy_gpu_adapter_class,
+    supports_mealpy_gpu_adapter,
+)
 from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
@@ -54,8 +59,8 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    "full",
     "ablation",
+    "full",
 ]
 MACRO_BETA_MIN = 0.2
 MACRO_BETA_MAX = 0.8
@@ -363,7 +368,11 @@ def build_optimizer(
 ):
 
     optimizer_name = resolve_optimizer_name(name)
-    optimizer_class = resolve_optimizer_class(name)
+    optimizer_class = (
+        mealpy_gpu_adapter_class(optimizer_name)
+        if args.compute_device == "gpu"
+        else None
+    ) or resolve_optimizer_class(name)
     optimizer_kwargs = optimizer_init_kwargs(
         optimizer_class,
         optimizer_name,
@@ -490,6 +499,13 @@ def optimizer_init_kwargs(
         "epoch": args.epochs,
         "pop_size": args.pop_size,
     }
+
+    if args.compute_device == "gpu" and supports_mealpy_gpu_adapter(optimizer_name):
+        optimizer_kwargs.update({
+            "compute_device": args.compute_device,
+            "gpu_memory_fraction": args.gpu_memory_fraction,
+        })
+        return optimizer_kwargs
 
     if optimizer_name not in CUSTOM_OPTIMIZERS:
         return optimizer_kwargs
@@ -650,7 +666,14 @@ def checkpoint_metadata(
 def optimizer_uses_gpu(optimizer_name, compute_device):
     if compute_device not in GPU_MODES:
         return False
-    return supports_gpu_batching(optimizer_name)
+    resolved_optimizer = resolve_optimizer_name(optimizer_name)
+    return (
+        supports_gpu_batching(optimizer_name)
+        or (
+            compute_device == "gpu"
+            and supports_mealpy_gpu_adapter(resolved_optimizer)
+        )
+    )
 
 def save_run_checkpoint(
     checkpoint_path,
@@ -901,6 +924,7 @@ def initialize_strict_gpu_worker(memory_fraction):
     """Create one persistent, process-local CUDA context."""
     logging.disable(logging.INFO)
     initialize_gpu(memory_fraction=memory_fraction)
+    configure_local_mealpy_gpu_backend()
     print_status(
         f"STRICT GPU WORKER READY | pid={os.getpid()} | "
         f"memory_fraction={memory_fraction:.3f} | objective_workers=0"
@@ -927,6 +951,21 @@ def run_strict_gpu_task(task):
     function_name = task["function_name"]
     optimizer_name = task["optimizer_name"]
     run_indices = task["run_indices"]
+    if not supports_gpu_batching(optimizer_name):
+        completed = []
+        for run in run_indices:
+            checkpoint_path, metadata = task["checkpoint_records"][run]
+            output = run_single(
+                function_name,
+                optimizer_name,
+                worker_args,
+                worker_args.seed_base + run,
+                run,
+                worker_args.runs,
+            )
+            save_run_checkpoint(checkpoint_path, metadata, output)
+            completed.append((run, output))
+        return os.getpid(), completed
     initialize_verified_gpu_objectives(worker_args, [function_name])
     active_batch_size = min(task["active_batch_size"], len(run_indices))
     if worker_args.gpu_batch_size == "auto" and worker_args.gpu_auto_calibration == "yes":
