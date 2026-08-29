@@ -42,7 +42,12 @@ from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-COMPUTE_DEVICE = "hybrid"
+EXP_ID = 628
+COMPUTE_DEVICE = "gpu"
+# Options:
+# "cpu"
+# "hybrid"
+# "gpu"
 CPU_WORKERS = None  # Auto-reserve CPU capacity for the OS/user.
 GPU_WORKERS = 1
 GPU_MEMORY_FRACTION = 0.85
@@ -129,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OPFUNU + MEALPY Benchmark Framework"
     )
-    parser.add_argument("--exp-id", type=int, default=628, help="Numeric experiment identifier")
+    parser.add_argument("--exp-id", type=int, default=EXP_ID, help="Numeric experiment identifier")
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
