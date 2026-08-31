@@ -27,7 +27,10 @@ _OBJECTIVE_DECISION_CACHE: dict[tuple, tuple[str, dict[str, float]]] = {}
 
 def _de_random_plan_chunk(task):
     """Build independent run plans in an existing CPU worker process."""
-    optimizer_name, pop_size, n_dims, cr, generator_states, close, far = task
+    (
+        optimizer_name, pop_size, n_dims, cr, generator_states,
+        close, far, div_norm,
+    ) = task
     all_indices = np.arange(pop_size, dtype=np.int64)
     fallback = tuple(
         np.concatenate((all_indices[:individual], all_indices[individual + 1:]))
@@ -39,25 +42,25 @@ def _de_random_plan_chunk(task):
     for run_offset, generator_state in enumerate(generator_states):
         rng = np.random.default_rng()
         rng.bit_generator.state = generator_state
-        close_pool = all_indices[close[run_offset]]
-        close_candidates = tuple(
-            close_pool[close_pool != individual] if close[run_offset, individual] else close_pool
+        if optimizer_name == "DE-MC-CF":
+            selected_mask = (
+                close[run_offset]
+                if div_norm[run_offset] >= 0.5
+                else far[run_offset]
+            )
+        else:
+            selected_mask = close[run_offset]
+        selected_pool = all_indices[selected_mask]
+        selected_candidates = tuple(
+            selected_pool[selected_pool != individual]
+            if selected_mask[individual]
+            else selected_pool
             for individual in range(pop_size)
         )
-        far_candidates = None
-        if optimizer_name == "DE-MC-CF":
-            far_pool = all_indices[far[run_offset]]
-            far_candidates = tuple(
-                far_pool[far_pool != individual] if far[run_offset, individual] else far_pool
-                for individual in range(pop_size)
-            )
         for individual in range(pop_size):
-            candidates = close_candidates[individual]
+            candidates = selected_candidates[individual]
             if candidates.size < 3:
-                if optimizer_name == "DE-MC-CF" and far_candidates[individual].size >= 3:
-                    candidates = far_candidates[individual]
-                else:
-                    candidates = fallback[individual]
+                candidates = fallback[individual]
             donors[run_offset, individual] = rng.choice(candidates, 3, replace=False)
             j0 = rng.integers(0, n_dims)
             mask = crossover[run_offset, individual]
@@ -447,12 +450,15 @@ class BatchedDEEngine:
         )
         if state.capture_trace:
             state.trace["initial_population"] = initial_cpu.copy()
-        if self.optimizer_name == "MaCRO-DE":
+        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE"}:
             div0 = self._awad(positions)
             state.algorithm_state.update(
                 div_max_seen=self.xp.maximum(div0, 1.0e-9),
                 div_norm_for_update=self.xp.ones(len(seeds), dtype=self.xp.float64),
                 div_norm_cpu=np.ones(len(seeds), dtype=np.float64),
+            )
+        if self.optimizer_name == "MaCRO-DE":
+            state.algorithm_state.update(
                 div_awad_history=[[] for _ in seeds],
                 div_norm_history=[[] for _ in seeds],
                 pcr_history=[[] for _ in seeds],
@@ -503,6 +509,12 @@ class BatchedDEEngine:
                     [state.generators[index].bit_generator.state for index in chunk],
                     np.ascontiguousarray(close[chunk]),
                     np.ascontiguousarray(far[chunk]),
+                    np.ascontiguousarray(
+                        state.algorithm_state.get(
+                            "div_norm_cpu",
+                            np.ones(batch_size, dtype=np.float64),
+                        )[chunk]
+                    ),
                 )
                 for chunk in chunk_indices
             ]
@@ -524,31 +536,29 @@ class BatchedDEEngine:
             "crossover", (batch_size, self.pop_size, self.n_dims), bool
         )
         all_indices = np.arange(self.pop_size, dtype=np.int64)
+        div_norm = state.algorithm_state.get(
+            "div_norm_cpu",
+            np.ones(batch_size, dtype=np.float64),
+        )
         for run_offset, rng in enumerate(state.generators):
-            close_pool = all_indices[close[run_offset]]
-            close_candidates = tuple(
-                close_pool[close_pool != individual] if close[run_offset, individual] else close_pool
+            if self.optimizer_name == "DE-MC-CF":
+                selected_mask = (
+                    close[run_offset]
+                    if div_norm[run_offset] >= 0.5
+                    else far[run_offset]
+                )
+            else:
+                selected_mask = close[run_offset]
+            selected_pool = all_indices[selected_mask]
+            selected_candidates = tuple(
+                selected_pool[selected_pool != individual]
+                if selected_mask[individual]
+                else selected_pool
                 for individual in range(self.pop_size)
             )
-            far_candidates = None
-            if self.optimizer_name == "DE-MC-CF":
-                far_pool = all_indices[far[run_offset]]
-                far_candidates = tuple(
-                    far_pool[far_pool != individual] if far[run_offset, individual] else far_pool
-                    for individual in range(self.pop_size)
-                )
             for individual in range(self.pop_size):
-                close_for_individual = close_candidates[individual]
-                if close_for_individual.size >= 3:
-                    candidates = close_for_individual
-                elif self.optimizer_name == "DE-MC-CF":
-                    far_for_individual = far_candidates[individual]
-                    candidates = (
-                        far_for_individual
-                        if far_for_individual.size >= 3
-                        else self._de_fallback_candidates[individual]
-                    )
-                else:
+                candidates = selected_candidates[individual]
+                if candidates.size < 3:
                     candidates = self._de_fallback_candidates[individual]
                 donors[run_offset, individual] = rng.choice(candidates, 3, replace=False)
                 j0 = rng.integers(0, self.n_dims)
@@ -727,7 +737,7 @@ class BatchedDEEngine:
         self._stage("history_store", store_history)
         state.epoch_counts += 1
 
-        if self.optimizer_name == "MaCRO-DE":
+        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE"}:
             algo = state.algorithm_state
             div_awad = self._stage("awad", lambda: self._awad(state.positions))
             algo["div_max_seen"] = self.xp.maximum(algo["div_max_seen"], div_awad)
@@ -739,6 +749,9 @@ class BatchedDEEngine:
             pending_gpu = self._flush_gpu_events() if self.backend.uses_gpu else 0.0
             self.timing.add("adaptive_transfer", max(0.0, transfer_wall - pending_gpu))
             algo["div_norm_cpu"] = adaptive_values[:, 1].copy()
+
+        if self.optimizer_name == "MaCRO-DE":
+            algo = state.algorithm_state
             fmean = np.mean(f_vectors, axis=(1, 2))
             for run_offset in range(len(state.seeds)):
                 algo["div_awad_history"][run_offset].append(float(adaptive_values[run_offset, 0]))

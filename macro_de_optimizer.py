@@ -49,6 +49,7 @@ class MaCRO_DE(Optimizer):
         self.div_max_seen = None
         self.div_norm_for_update = 1.0
         self.mahalanobis_threshold = None
+        self._awad_pair_indices = None
 
     def initialize_variables(self):
         self.div_awad_hist = np.full(self.epoch, np.nan, dtype=float)
@@ -89,14 +90,15 @@ class MaCRO_DE(Optimizer):
         if npop <= 1:
             min_distance = 0.0
         else:
-            min_distance = np.inf
-            for i in range(npop - 1):
-                diff = (pop_pos[i + 1 :] - pop_pos[i]) / std_devs
-                dists = np.sqrt(np.sum(diff * diff, axis=1))
-                if dists.size > 0:
-                    local_min = float(np.min(dists))
-                    if local_min < min_distance:
-                        min_distance = local_min
+            pair_count = npop * (npop - 1) // 2
+            if (
+                self._awad_pair_indices is None
+                or self._awad_pair_indices[0].size != pair_count
+            ):
+                self._awad_pair_indices = np.triu_indices(npop, k=1)
+            left, right = self._awad_pair_indices
+            diff = (pop_pos[right] - pop_pos[left]) / std_devs
+            min_distance = float(np.min(np.sqrt(np.sum(diff * diff, axis=1))))
             if not np.isfinite(min_distance):
                 min_distance = 0.0
 
