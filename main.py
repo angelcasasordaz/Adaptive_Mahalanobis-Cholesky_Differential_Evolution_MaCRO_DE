@@ -156,23 +156,24 @@ SENSITIVITY_PARAMETER_ATTRIBUTES = {
 }
 CHART_CMAP = "tab20"
 OPTIMIZER_COLOR_MAP = {
-    "DE": "#1f77b4",
     "DE-M": "#ff7f0e",
     "DE-MC": "#2ca02c",
     "DE-MC-CF": "#9467bd",
-    "MaCRO-DE": "#d62728",
-    "BRO": "#8c564b",
-    "DBO": "#e377c2",
-    "DMO": "#7f7f7f",
-    "GWO": "#bcbd22",
-    "HHO": "#17becf",
-    "MFO": "#393b79",
-    "MGO": "#637939",
-    "PSO": "#8c6d31",
-    "SHADE": "#843c39",
-    "WOA": "#7b4173",
+
+    "BRO": "#577590",
+    "DBO": "#00A6A6",
+    "DE": "#6A4C93",
+    "DMO": "#90BE6D",
+    "GWO": "#E06C00",
+    "HHO": "#4D4D4D",
+    "MFO": "#8A5A44",
+    "MGO": "#F9844A",
+    "PSO": "#9B59B6",
+    "SHADE": "#264653",
+    "WOA": "#2A9D5B",
+    "MaCRO-DE": "#3266AD",
 }
-CONVERGENCE_SCALE = "linear"
+CONVERGENCE_SCALE = "log"
 CONVERGENCE_SHOW_MARKERS = False
 CONVERGENCE_USE_LINE_STYLES = False
 # CONVERGENCE_SCALE options:
@@ -1868,6 +1869,18 @@ def plot_convergence(
         zorder = 3 if is_macro_de else 2
         linewidth = 2.5 if is_macro_de else 2.0
         marker_offset = style_index % marker_interval
+
+        if is_macro_de:
+            ax.plot(
+                plot_curve,
+                linewidth=4.0,
+                label="_nolegend_",
+                color="black",
+                solid_capstyle="round",
+                linestyle=linestyle,
+                alpha=0.90,
+                zorder=zorder - 0.1,
+            )
 
         ax.plot(
             plot_curve,
