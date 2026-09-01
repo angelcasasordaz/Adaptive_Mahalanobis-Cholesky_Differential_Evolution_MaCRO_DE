@@ -117,7 +117,7 @@ DEFAULT_OPTIMIZERS = [
     "PSO",
     "SHADE",
     "WOA",
-    "ESO",
+    "FLA",
 ]
 ABLATION_OPTIMIZERS = [
     "DE",
