@@ -712,42 +712,46 @@ def build_problem(
 
     return benchmark, problem
 
-def build_cache_signature(args):
+def optimizer_scientific_parameters(optimizer_name, args):
+    """Return only parameters that can change this optimizer's results."""
+    canonical_name = resolve_optimizer_name(optimizer_name)
+    optimizer_class = resolve_optimizer_class(optimizer_name)
+    scientific_args = argparse.Namespace(**vars(args))
+    # Backend selection is execution policy, and must not suppress custom
+    # scientific kwargs when a GPU adapter is available.
+    scientific_args.compute_device = "cpu"
+    init_kwargs = optimizer_init_kwargs(
+        optimizer_class,
+        canonical_name,
+        scientific_args,
+    )
+    execution_only = {
+        "compute_device",
+        "gpu_memory_fraction",
+    }
+    parameters = {
+        key: value
+        for key, value in init_kwargs.items()
+        if key not in execution_only and key not in {"epoch", "pop_size"}
+    }
+    if canonical_name == "DE-MC-CF":
+        parameters["implementation_revision"] = DE_MC_CF_IMPLEMENTATION_REVISION
+    return parameters
 
+
+def build_cache_signature(args, optimizer_name):
+    """Build an optimizer-local signature; the comparison list is reporting-only."""
     payload = {
-        "experiment_mode": args.experiment_mode,
         "benchmark": args.benchmark,
-        "functions": args.functions,
-        "optimizers": args.optimizers,
+        "optimizer": resolve_optimizer_name(optimizer_name),
         "dims": args.dims,
         "epochs": args.epochs,
         "pop_size": args.pop_size,
-        "runs": args.runs,
         "seed_base": args.seed_base,
-        **(
-            {
-                "ablation_functions": (
-                    None
-                    if ABLATION_FUNCTIONS is None
-                    else list(ABLATION_FUNCTIONS)
-                )
-            }
-            if args.experiment_mode == "ablation" and args.benchmark == "CEC2017"
-            else {}
+        "optimizer_parameters": optimizer_scientific_parameters(
+            optimizer_name,
+            args,
         ),
-        **(
-            {
-                "sensitivity_parameter": args.sensitivity_parameter,
-                "sensitivity_value": args.sensitivity_value,
-                "sensitivity_functions": list(SENSITIVITY_FUNCTIONS),
-            }
-            if args.experiment_mode == "sensitivity"
-            else {}
-        ),
-        "macro_beta_min": args.macro_beta_min,
-        "macro_beta_max": args.macro_beta_max,
-        "macro_pcr": args.macro_pcr,
-        "macro_mahal_q": args.macro_mahal_q,
     }
     return hashlib.sha1(
 
@@ -836,22 +840,13 @@ def checkpoint_metadata(
 
     return {
         "cache_signature": cache_signature,
-        **(
-            {
-                "experiment_mode": args.experiment_mode,
-                "sensitivity_parameter": args.sensitivity_parameter,
-                "sensitivity_value": args.sensitivity_value,
-                "macro_beta_min": args.macro_beta_min,
-                "macro_beta_max": args.macro_beta_max,
-                "macro_pcr": args.macro_pcr,
-                "macro_mahal_q": args.macro_mahal_q,
-            }
-            if args.experiment_mode == "sensitivity"
-            else {}
-        ),
         "benchmark": args.benchmark,
         "function_name": function_name,
         "optimizer_name": optimizer_name,
+        "optimizer_parameters": optimizer_scientific_parameters(
+            optimizer_name,
+            args,
+        ),
         "dims": args.dims,
         "epochs": args.epochs,
         "pop_size": args.pop_size,
@@ -942,6 +937,7 @@ def save_run_checkpoint(
 def load_run_checkpoint(
     checkpoint_path,
     expected_metadata,
+    report_invalid=True,
 ):
 
     if not os.path.exists(checkpoint_path):
@@ -951,21 +947,20 @@ def load_run_checkpoint(
         with open(checkpoint_path, "rb") as file:
             payload = pickle.load(file)
     except Exception as exc:
-        print_status(
-            f"CACHE INVALID | path={checkpoint_path} | reason={exc}"
-        )
+        if report_invalid:
+            print_status(
+                f"CACHE INVALID | path={checkpoint_path} | reason={exc}"
+            )
         return None
 
-    cached_scientific_metadata = scientific_checkpoint_metadata(
-        payload.get("metadata")
-    )
-    expected_scientific_metadata = scientific_checkpoint_metadata(
-        expected_metadata
-    )
-    if cached_scientific_metadata != expected_scientific_metadata:
-        print_status(
-            f"CACHE MISMATCH | path={checkpoint_path}"
-        )
+    if not checkpoint_metadata_compatible(
+        payload.get("metadata"),
+        expected_metadata,
+    ):
+        if report_invalid:
+            print_status(
+                f"CACHE MISMATCH | path={checkpoint_path}"
+            )
         return None
 
     output = payload.get("output")
@@ -976,9 +971,10 @@ def load_run_checkpoint(
         "curve",
     }
     if not isinstance(output, dict) or not required_keys.issubset(output):
-        print_status(
-            f"CACHE INVALID | path={checkpoint_path} | reason=missing keys"
-        )
+        if report_invalid:
+            print_status(
+                f"CACHE INVALID | path={checkpoint_path} | reason=missing keys"
+            )
         return None
 
     return output
@@ -1012,6 +1008,121 @@ def scientific_checkpoint_metadata(metadata):
         for key, value in metadata.items()
         if key not in EXECUTION_METADATA_KEYS
     }
+
+
+SCIENTIFIC_RUN_KEYS = (
+    "benchmark",
+    "function_name",
+    "optimizer_name",
+    "dims",
+    "epochs",
+    "pop_size",
+    "run",
+    "seed",
+)
+
+
+def _legacy_default_optimizer_parameters(optimizer_name, expected_metadata):
+    """Infer parameters omitted by old full-mode checkpoints at their defaults."""
+    canonical_name = resolve_optimizer_name(optimizer_name)
+    if canonical_name not in CUSTOM_OPTIMIZERS:
+        return {}
+    legacy_args = argparse.Namespace(
+        epochs=expected_metadata["epochs"],
+        pop_size=expected_metadata["pop_size"],
+        compute_device="cpu",
+        gpu_memory_fraction=GPU_MEMORY_FRACTION,
+        macro_beta_min=MACRO_BETA_MIN,
+        macro_beta_max=MACRO_BETA_MAX,
+        macro_pcr=MACRO_PCR,
+        macro_mahal_q=MACRO_MAHAL_Q,
+    )
+    return optimizer_scientific_parameters(optimizer_name, legacy_args)
+
+
+def checkpoint_metadata_compatible(cached_metadata, expected_metadata):
+    """Compare scientific run identity, including legacy checkpoint metadata."""
+    if not isinstance(cached_metadata, dict):
+        return False
+    if any(
+        cached_metadata.get(key) != expected_metadata.get(key)
+        for key in SCIENTIFIC_RUN_KEYS
+    ):
+        return False
+
+    expected_parameters = expected_metadata.get("optimizer_parameters", {})
+    if "optimizer_parameters" in cached_metadata:
+        return cached_metadata["optimizer_parameters"] == expected_parameters
+
+    # Sensitivity checkpoints already recorded the MaCRO-DE values explicitly.
+    legacy_parameter_names = {
+        "beta_min": "macro_beta_min",
+        "beta_max": "macro_beta_max",
+        "pcr": "macro_pcr",
+        "mahalanobis_q": "macro_mahal_q",
+    }
+    recorded_parameters = {
+        parameter_name: cached_metadata[metadata_name]
+        for parameter_name, metadata_name in legacy_parameter_names.items()
+        if metadata_name in cached_metadata
+    }
+    if recorded_parameters:
+        return all(
+            expected_parameters.get(name) == value
+            for name, value in recorded_parameters.items()
+        ) and all(
+            name in recorded_parameters or name == "implementation_revision"
+            for name in expected_parameters
+        )
+
+    # Old comparison checkpoints omitted custom parameters from full-mode
+    # metadata. They are reusable only for the historical default parameter set.
+    expected_revision = expected_parameters.get("implementation_revision")
+    cached_revision = cached_metadata.get("optimizer_implementation_revision")
+    if expected_revision is not None and cached_revision != expected_revision:
+        return False
+    return expected_parameters == _legacy_default_optimizer_parameters(
+        expected_metadata["optimizer_name"],
+        expected_metadata,
+    )
+
+
+def compatible_checkpoint_path(
+    search_paths,
+    current_checkpoint_path,
+    expected_metadata,
+    function_name,
+    optimizer_name,
+    run,
+):
+    """Find a compatible checkpoint in place without copying or rewriting it."""
+    optimizer_tag = (
+        f"{safe_path_component(optimizer_name)}_"
+        f"{hashlib.sha1(str(optimizer_name).encode('utf-8')).hexdigest()[:8]}"
+    )
+    candidates = [current_checkpoint_path]
+    for candidate_paths in search_paths:
+        pattern = os.path.join(
+            candidate_paths.cache_dir,
+            "*",
+            safe_path_component(function_name),
+            optimizer_tag,
+            f"run_{run + 1:03d}.pkl",
+        )
+        candidates.extend(sorted(glob.glob(pattern), reverse=True))
+
+    seen = set()
+    for candidate_path in candidates:
+        if candidate_path in seen:
+            continue
+        seen.add(candidate_path)
+        if load_run_checkpoint(
+            candidate_path,
+            expected_metadata,
+            report_invalid=False,
+        ) is not None:
+            return candidate_path
+    return None
 
 
 def import_run_checkpoint(
@@ -2815,6 +2926,87 @@ def export_friedman_analysis(
         )
     return analysis
 
+def validate_optimizer_list(args):
+    """Fail-fast audit for every optimizer selected in this experiment mode."""
+    print("\nOPTIMIZER STARTUP AUDIT")
+    invalid = []
+    width = max((len(str(name)) for name in args.optimizers), default=1)
+    for optimizer_name in args.optimizers:
+        try:
+            resolve_optimizer_name(optimizer_name)
+            resolve_optimizer_class(optimizer_name)
+        except (ImportError, AttributeError, TypeError, ValueError) as exc:
+            invalid.append((optimizer_name, str(exc)))
+            print(f"{optimizer_name:<{width}} : INVALID / unknown optimizer")
+        else:
+            print(f"{optimizer_name:<{width}} : VALID")
+    if invalid:
+        invalid_names = ", ".join(str(name) for name, _ in invalid)
+        details = "; ".join(
+            f"{name}: {message}" for name, message in invalid
+        )
+        raise ValueError(
+            f"Invalid optimizer(s): {invalid_names}. No experiments started. {details}"
+        )
+
+
+def audit_checkpoint_cache(args, paths, source_paths, selected_functions):
+    """Inspect all selected runs before computation and return compatible paths."""
+    compatible_paths = {}
+    search_paths = [paths]
+    if source_paths is not None and source_paths.cache_dir != paths.cache_dir:
+        search_paths.append(source_paths)
+    configurations = list(optimizer_experiment_configurations(args))
+    label_width = max((len(label) for label, _, _ in configurations), default=1)
+
+    print("\nCACHE STARTUP AUDIT")
+    for function_name in selected_functions:
+        print(f"Function {function_name}")
+        for optimizer_label, optimizer_name, optimizer_args in configurations:
+            signature = build_cache_signature(optimizer_args, optimizer_name)
+            cached_count = 0
+            for run in range(optimizer_args.runs):
+                seed = optimizer_args.seed_base + run
+                current_path = run_checkpoint_path(
+                    paths,
+                    signature,
+                    function_name,
+                    optimizer_name,
+                    run,
+                )
+                metadata = checkpoint_metadata(
+                    optimizer_args,
+                    signature,
+                    function_name,
+                    optimizer_name,
+                    run,
+                    seed,
+                )
+                matched_path = compatible_checkpoint_path(
+                    search_paths,
+                    current_path,
+                    metadata,
+                    function_name,
+                    optimizer_name,
+                    run,
+                )
+                compatible_paths[(function_name, optimizer_label, run)] = matched_path
+                cached_count += matched_path is not None
+
+            missing_count = optimizer_args.runs - cached_count
+            if missing_count == 0:
+                cache_status = "COMPLETE"
+            elif cached_count == 0:
+                cache_status = "NEW"
+            else:
+                cache_status = f"RESUME {missing_count}"
+            print(
+                f"{optimizer_label:<{label_width}} : "
+                f"{cached_count}/{optimizer_args.runs} cached | {cache_status}"
+            )
+    return compatible_paths
+
+
 def run_experiment(args):
 
     if args.compute_device == "gpu" and args.objective_evaluation == "process":
@@ -2828,6 +3020,31 @@ def run_experiment(args):
             flush=True,
         )
 
+    # Cache inspection precedes worker pools, GPU initialization, objective
+    # verification, and every optimizer solve.
+    args.resolved_gpu_batch_size = 1
+    args.estimated_gpu_batch_capacity = 1
+    paths = make_paths(args)
+    source_paths = None
+    if args.reuse_cache and args.reuse_cache_from_exp_id is not None:
+        source_args = argparse.Namespace(**vars(args))
+        source_args.exp_id = args.reuse_cache_from_exp_id
+        source_paths = make_paths(source_args, create=False)
+    optimizer_order = comparison_optimizer_order(args)
+    optimizer_colors = build_optimizer_colors(optimizer_order)
+    function_map = discover_benchmark_functions(
+        args.benchmark,
+        args.dims,
+    )
+    args.function_map = function_map
+    selected_functions = select_experiment_functions(args, function_map)
+    compatible_paths = audit_checkpoint_cache(
+        args,
+        paths,
+        source_paths,
+        selected_functions,
+    )
+
     if args.compute_device == "cpu":
         # CPU batching is the outer numerical workload in the controller, just
         # as independent runs are the outer workload in child processes.
@@ -2835,8 +3052,6 @@ def run_experiment(args):
 
     gpu_info = None
     strict_gpu_executor = None
-    args.resolved_gpu_batch_size = 1
-    args.estimated_gpu_batch_capacity = 1
     if args.compute_device in GPU_MODES:
         gpu_info = initialize_gpu(memory_fraction=args.gpu_memory_fraction)
         if args.compute_device == "gpu":
@@ -2872,24 +3087,6 @@ def run_experiment(args):
                 args.runs,
             )
     logging.disable(logging.INFO)
-    paths = make_paths(args)
-    source_paths = None
-    if args.reuse_cache and args.reuse_cache_from_exp_id is not None:
-        source_args = argparse.Namespace(**vars(args))
-        source_args.exp_id = args.reuse_cache_from_exp_id
-        source_paths = make_paths(source_args, create=False)
-    cache_signature = build_cache_signature(args)
-    optimizer_order = comparison_optimizer_order(args)
-    optimizer_colors = build_optimizer_colors(optimizer_order)
-    function_map = discover_benchmark_functions(
-        args.benchmark,
-        args.dims,
-    )
-
-    args.function_map = function_map
-
-    selected_functions = select_experiment_functions(args, function_map)
-
     if args.compute_device == "gpu":
         # Strict-GPU objectives are constructed only after spawn, beside the
         # worker's local CUDA context.  No CuPy object crosses this boundary.
@@ -3000,9 +3197,7 @@ def run_experiment(args):
     print(
         f"Extra scale    : {args.convergence_extra_scale}"
     )
-    print(
-        f"Cache signature: {cache_signature}"
-    )
+    print("Cache identity : per optimizer/run")
 
     objective_executor = None
     if (
@@ -3045,7 +3240,10 @@ def run_experiment(args):
             start=1,
         ):
             optimizer_label, optimizer_name, optimizer_args = optimizer_configuration
-            optimizer_cache_signature = build_cache_signature(optimizer_args)
+            optimizer_cache_signature = build_cache_signature(
+                optimizer_args,
+                optimizer_name,
+            )
 
             try:
                 print_status(
@@ -3094,47 +3292,15 @@ def run_experiment(args):
                     )
 
                     cached_output = None
-                    cache_origin = None
                     if optimizer_args.reuse_cache:
-                        cached_output = load_run_checkpoint(
-                            checkpoint_path,
-                            metadata,
+                        matched_path = compatible_paths.get(
+                            (function_name, optimizer_label, run)
                         )
-                        if cached_output is not None:
-                            cache_origin = "current"
-                        elif source_paths is not None:
-                            source_checkpoint_path = run_checkpoint_path(
-                                source_paths,
-                                optimizer_cache_signature,
-                                function_name,
-                                optimizer_name,
-                                run,
-                            )
-                            cached_output = import_run_checkpoint(
-                                source_checkpoint_path,
-                                checkpoint_path,
-                                metadata,
-                                source_paths.exp_tag,
-                                paths.exp_tag,
-                                function_name,
-                                optimizer_name,
-                                run,
-                            )
-                            if cached_output is not None:
-                                cache_origin = "imported"
-                        if (
-                            cached_output is None
-                            and resolved_optimizer not in CUSTOM_OPTIMIZERS
-                        ):
-                            cached_output = load_compatible_cpu_checkpoint(
-                                paths,
-                                function_name,
-                                optimizer_name,
-                                run,
+                        if matched_path is not None:
+                            cached_output = load_run_checkpoint(
+                                matched_path,
                                 metadata,
                             )
-                            if cached_output is not None:
-                                cache_origin = "current"
 
                     if cached_output is None:
                         pending_runs.append(run)
@@ -3142,12 +3308,11 @@ def run_experiment(args):
                         completed.append(
                             (run, cached_output)
                         )
-                        if cache_origin == "current":
-                            print_status(
-                                f"CACHE HIT CURRENT | function={function_name} | "
-                                f"optimizer={optimizer_label} | "
-                                f"run={run + 1}/{optimizer_args.runs}"
-                            )
+                        print_status(
+                            f"CACHE HIT | function={function_name} | "
+                            f"optimizer={optimizer_label} | "
+                            f"run={run + 1}/{optimizer_args.runs}"
+                        )
 
                 if pending_runs:
                     mode_had_pending_runs = True
@@ -3547,6 +3712,11 @@ def main():
         return
 
     configurations = list(experiment_configurations(args))
+    for mode_args in configurations:
+        print_status(
+            f"STARTUP AUDIT | mode={mode_args.experiment_mode}"
+        )
+        validate_optimizer_list(mode_args)
     for config_index, mode_args in enumerate(configurations, start=1):
         print_status(
             f"EXPERIMENT CONFIGURATION {config_index}/{len(configurations)} | "
