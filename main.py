@@ -48,9 +48,9 @@ from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 4
-REUSE_CACHE_FROM_EXP_ID = 2
-COMPUTE_DEVICE = "hybrid"
+EXP_ID = 5
+REUSE_CACHE_FROM_EXP_ID = 5
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -117,7 +117,7 @@ DEFAULT_OPTIMIZERS = [
     "PSO",
     "SHADE",
     "WOA",
-    "RIME",
+    "ESO",
 ]
 ABLATION_OPTIMIZERS = [
     "DE",
@@ -164,6 +164,7 @@ OPTIMIZER_COLOR_MAP = {
     "DBO": "#00A6A6",
     "DE": "#6A4C93",
     "DMO": "#90BE6D",
+    "GA": "#D81B60",
     "GWO": "#E06C00",
     "HHO": "#4D4D4D",
     "MFO": "#8A5A44",
@@ -171,11 +172,12 @@ OPTIMIZER_COLOR_MAP = {
     "PSO": "#9B59B6",
     "SHADE": "#264653",
     "WOA": "#2A9D5B",
+    "RIME": "#E3B505",
     "MaCRO-DE": "#3266AD",
 }
 CONVERGENCE_SCALE = "log"
-CONVERGENCE_SHOW_MARKERS = False
-CONVERGENCE_USE_LINE_STYLES = False
+CONVERGENCE_SHOW_MARKERS = True
+CONVERGENCE_USE_LINE_STYLES = True
 # CONVERGENCE_SCALE options:
 # "linear"
 # "log"
@@ -721,15 +723,7 @@ def build_cache_signature(args):
         "epochs": args.epochs,
         "pop_size": args.pop_size,
         "runs": args.runs,
-        "compute_device": args.compute_device,
-        "cpu_workers": args.n_workers,
-        "gpu_workers": args.gpu_workers,
-        "gpu_memory_fraction": args.gpu_memory_fraction,
-        "gpu_batch_size": args.gpu_batch_size,
-        "resolved_gpu_batch_size": args.resolved_gpu_batch_size,
-        "estimated_gpu_batch_capacity": args.estimated_gpu_batch_capacity,
-        "gpu_batch_engine_version": BATCH_ENGINE_VERSION,
-        "gpu_batch_policy": "performance-aware",
+        "seed_base": args.seed_base,
         **(
             {
                 "ablation_functions": (
@@ -750,20 +744,6 @@ def build_cache_signature(args):
             if args.experiment_mode == "sensitivity"
             else {}
         ),
-        **(
-            {
-                "cpu_custom_execution": (
-                    "batched-v1" if cpu_batching_enabled(args) else "mealpy-scalar"
-                )
-            }
-            if args.compute_device == "cpu"
-            else {}
-        ),
-        "objective_workers": args.objective_workers,
-        "objective_evaluation": args.objective_evaluation,
-        "cec_objective_backend": args.cec_objective_backend,
-        "cec_gpu_version": "cec2017-complete-v3",
-        "cec_gpu_verification_points": args.cec_gpu_verification_points,
         "macro_beta_min": args.macro_beta_min,
         "macro_beta_max": args.macro_beta_max,
         "macro_pcr": args.macro_pcr,
@@ -976,7 +956,13 @@ def load_run_checkpoint(
         )
         return None
 
-    if payload.get("metadata") != expected_metadata:
+    cached_scientific_metadata = scientific_checkpoint_metadata(
+        payload.get("metadata")
+    )
+    expected_scientific_metadata = scientific_checkpoint_metadata(
+        expected_metadata
+    )
+    if cached_scientific_metadata != expected_scientific_metadata:
         print_status(
             f"CACHE MISMATCH | path={checkpoint_path}"
         )
@@ -996,6 +982,36 @@ def load_run_checkpoint(
         return None
 
     return output
+
+
+EXECUTION_METADATA_KEYS = frozenset({
+    "compute_device",
+    "cpu_workers",
+    "gpu_workers",
+    "gpu_memory_fraction",
+    "gpu_batch_size",
+    "resolved_gpu_batch_size",
+    "estimated_gpu_batch_capacity",
+    "gpu_batch_engine_version",
+    "gpu_batch_policy",
+    "cpu_custom_execution",
+    "objective_workers",
+    "objective_evaluation",
+    "cec_objective_backend",
+    "cec_gpu_version",
+    "cec_gpu_verification_points",
+})
+
+
+def scientific_checkpoint_metadata(metadata):
+    """Return checkpoint identity fields while retaining backend trace metadata on disk."""
+    if not isinstance(metadata, dict):
+        return metadata
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in EXECUTION_METADATA_KEYS
+    }
 
 
 def import_run_checkpoint(
@@ -1857,18 +1873,28 @@ def plot_convergence(
         else:
             plot_curve = curve
 
-        color = optimizer_colors.get(
-            optimizer_name,
-            None,
+        color = (
+            OPTIMIZER_COLOR_MAP["MaCRO-DE"]
+            if is_macro_de
+            else optimizer_colors.get(optimizer_name, None)
         )
         linestyle = (
-            LINE_STYLES[style_index % len(LINE_STYLES)]
-            if use_line_styles
-            else "-"
+            "-"
+            if is_macro_de or not use_line_styles
+            else LINE_STYLES[style_index % len(LINE_STYLES)]
+        )
+        marker = (
+            MARKERS[style_index % len(MARKERS)]
+            if show_markers and not is_macro_de
+            else None
+        )
+        markevery = (
+            (style_index % marker_interval, marker_interval)
+            if marker is not None
+            else None
         )
         zorder = 3 if is_macro_de else 2
         linewidth = 2.5 if is_macro_de else 2.0
-        marker_offset = style_index % marker_interval
 
         if is_macro_de:
             ax.plot(
@@ -1891,8 +1917,8 @@ def plot_convergence(
             color=color,
             solid_capstyle="round",
             linestyle=linestyle,
-            marker=(MARKERS[style_index % len(MARKERS)] if show_markers else None),
-            markevery=((marker_offset, marker_interval) if show_markers else None),
+            marker=marker,
+            markevery=markevery,
             markersize=4.5,
             markeredgewidth=0.8,
             alpha=0.82,
@@ -2312,15 +2338,42 @@ def plot_overlap_diagnostic(
     marker_interval = max(1, len(reference) // 18)
     for style_index, optimizer_name in enumerate(OVERLAP_DIAGNOSTIC_OPTIMIZERS):
         curve = curves[optimizer_name]
+        is_macro_de = is_macro_de_optimizer(optimizer_name)
+        color = (
+            OPTIMIZER_COLOR_MAP["MaCRO-DE"]
+            if is_macro_de
+            else colors[optimizer_name]
+        )
+        linestyle = (
+            "-"
+            if is_macro_de
+            else LINE_STYLES[style_index % len(LINE_STYLES)]
+        )
+        marker = None if is_macro_de else MARKERS[style_index % len(MARKERS)]
+        if is_macro_de:
+            curve_ax.plot(
+                iterations,
+                curve,
+                label="_nolegend_",
+                color="black",
+                linestyle="-",
+                linewidth=4.0,
+                alpha=0.90,
+                zorder=2 + style_index - 0.1,
+            )
         curve_ax.plot(
             iterations,
             curve,
             label=display_optimizer_name(optimizer_name),
-            color=colors[optimizer_name],
-            linestyle=LINE_STYLES[style_index % len(LINE_STYLES)],
-            marker=MARKERS[style_index % len(MARKERS)],
-            markevery=(style_index % marker_interval, marker_interval),
-            linewidth=2.1,
+            color=color,
+            linestyle=linestyle,
+            marker=marker,
+            markevery=(
+                (style_index % marker_interval, marker_interval)
+                if marker is not None
+                else None
+            ),
+            linewidth=2.5 if is_macro_de else 2.1,
             markersize=4.5,
             alpha=0.82,
             zorder=2 + style_index,
@@ -2330,8 +2383,8 @@ def plot_overlap_diagnostic(
                 iterations,
                 np.maximum(difference_curves[optimizer_name], zero_display_floor),
                 label=f"|{optimizer_name} - DE-M|",
-                color=colors[optimizer_name],
-                linestyle=LINE_STYLES[style_index % len(LINE_STYLES)],
+                color=color,
+                linestyle=linestyle,
                 linewidth=1.9,
             )
 
