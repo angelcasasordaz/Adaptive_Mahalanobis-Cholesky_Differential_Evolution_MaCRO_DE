@@ -48,7 +48,7 @@ from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 3
+EXP_ID = 4
 REUSE_CACHE_FROM_EXP_ID = 2
 COMPUTE_DEVICE = "hybrid"
 # Options:
@@ -61,17 +61,31 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    # "full",
+    "full",
     "ablation",
+    "sensitivity",
 ]
+
 MACRO_BETA_MIN = 0.2
 MACRO_BETA_MAX = 0.8
 MACRO_PCR = 0.2
 MACRO_MAHAL_Q = 0.68
+
+SENSITIVITY_PARAMETER = "mahalanobis_q"
+SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
+
+# SENSITIVITY_PARAMETER = "beta_min"
+# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
+# SENSITIVITY_PARAMETER = "beta_max"
+# SENSITIVITY_VALUES = [0.60, 0.70, 0.80, 0.90]
+# SENSITIVITY_PARAMETER = "pcr"
+# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
+# SENSITIVITY_PARAMETER = "mahalanobis_q"
+# SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
+
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
 
 AVAILABLE_BENCHMARKS = {
-
     "CEC2005": "opfunu.cec_based.cec2005",
     "CEC2008": "opfunu.cec_based.cec2008",
     "CEC2010": "opfunu.cec_based.cec2010",
@@ -95,6 +109,7 @@ DEFAULT_OPTIMIZERS = [
     "DBO",
     "DE",
     "DMO",
+    "GA",
     "GWO",
     "HHO",
     "MFO",
@@ -102,6 +117,7 @@ DEFAULT_OPTIMIZERS = [
     "PSO",
     "SHADE",
     "WOA",
+    "RIME",
 ]
 ABLATION_OPTIMIZERS = [
     "DE",
@@ -126,6 +142,18 @@ ABLATION_FUNCTIONS = [
     "F152017",
     "F242017",
 ]
+SENSITIVITY_FUNCTIONS = [
+    "F12017",
+    "F82017",
+    "F152017",
+    "F242017",
+]
+SENSITIVITY_PARAMETER_ATTRIBUTES = {
+    "beta_min": "macro_beta_min",
+    "beta_max": "macro_beta_max",
+    "pcr": "macro_pcr",
+    "mahalanobis_q": "macro_mahal_q",
+}
 CHART_CMAP = "tab20"
 OPTIMIZER_COLOR_MAP = {
     "DE": "#1f77b4",
@@ -213,13 +241,13 @@ def parse_args() -> argparse.Namespace:
     mode_group.add_argument(
         "--experiment-modes",
         nargs="+",
-        choices=["full", "ablation"],
+        choices=["full", "ablation", "sensitivity"],
         default=None,
         help="Experiment modes to execute sequentially (default: EXPERIMENT_MODES)",
     )
     mode_group.add_argument(
         "--experiment-mode",
-        choices=["full", "ablation"],
+        choices=["full", "ablation", "sensitivity"],
         default=None,
         help="Execute one experiment mode (backward-compatible alias)",
     )
@@ -331,8 +359,59 @@ def apply_experiment_mode(args, experiment_mode):
 
     if args.experiment_mode == "ablation":
         args.optimizers = list(ABLATION_OPTIMIZERS)
+    elif args.experiment_mode == "sensitivity":
+        if args.benchmark != "CEC2017":
+            raise ValueError("Sensitivity mode supports CEC2017 only")
+        if SENSITIVITY_PARAMETER not in SENSITIVITY_PARAMETER_ATTRIBUTES:
+            raise ValueError(
+                "SENSITIVITY_PARAMETER must be one of: "
+                f"{', '.join(SENSITIVITY_PARAMETER_ATTRIBUTES)}"
+            )
+        if not SENSITIVITY_VALUES:
+            raise ValueError("SENSITIVITY_VALUES must contain at least one value")
+        args.optimizers = ["MaCRO-DE"]
+        args.sensitivity_parameter = SENSITIVITY_PARAMETER
+        args.sensitivity_values = list(SENSITIVITY_VALUES)
+        args.sensitivity_value = None
     elif args.optimizers is None:
         args.optimizers = list(DEFAULT_OPTIMIZERS)
+
+
+def sensitivity_optimizer_label(parameter, value):
+    return f"MaCRO-DE ({parameter}={value:g})"
+
+
+def comparison_optimizer_order(args):
+    if args.experiment_mode != "sensitivity":
+        return list(args.optimizers)
+    return [
+        sensitivity_optimizer_label(args.sensitivity_parameter, value)
+        for value in args.sensitivity_values
+    ]
+
+
+def optimizer_experiment_configurations(args):
+    if args.experiment_mode != "sensitivity":
+        for optimizer_name in args.optimizers:
+            yield optimizer_name, optimizer_name, args
+        return
+
+    parameter_attribute = SENSITIVITY_PARAMETER_ATTRIBUTES[
+        args.sensitivity_parameter
+    ]
+    for value in args.sensitivity_values:
+        variant_args = argparse.Namespace(**vars(args))
+        variant_args.macro_beta_min = MACRO_BETA_MIN
+        variant_args.macro_beta_max = MACRO_BETA_MAX
+        variant_args.macro_pcr = MACRO_PCR
+        variant_args.macro_mahal_q = MACRO_MAHAL_Q
+        setattr(variant_args, parameter_attribute, float(value))
+        variant_args.sensitivity_value = float(value)
+        yield (
+            sensitivity_optimizer_label(args.sensitivity_parameter, value),
+            "MaCRO-DE",
+            variant_args,
+        )
 
 def make_paths(args, create=True):
 
@@ -663,6 +742,15 @@ def build_cache_signature(args):
         ),
         **(
             {
+                "sensitivity_parameter": args.sensitivity_parameter,
+                "sensitivity_value": args.sensitivity_value,
+                "sensitivity_functions": list(SENSITIVITY_FUNCTIONS),
+            }
+            if args.experiment_mode == "sensitivity"
+            else {}
+        ),
+        **(
+            {
                 "cpu_custom_execution": (
                     "batched-v1" if cpu_batching_enabled(args) else "mealpy-scalar"
                 )
@@ -691,6 +779,17 @@ def build_cache_signature(args):
 
 
 def select_experiment_functions(args, function_map):
+    if args.experiment_mode == "sensitivity":
+        requested = list(SENSITIVITY_FUNCTIONS)
+        missing = [name for name in requested if name not in function_map]
+        if missing:
+            raise ValueError(
+                "Unknown CEC2017 sensitivity function(s): "
+                f"{', '.join(missing)}. Available functions: "
+                f"{', '.join(function_map)}"
+            )
+        return requested
+
     if args.experiment_mode == "ablation" and args.benchmark == "CEC2017":
         requested = (
             list(function_map)
@@ -756,6 +855,19 @@ def checkpoint_metadata(
 
     return {
         "cache_signature": cache_signature,
+        **(
+            {
+                "experiment_mode": args.experiment_mode,
+                "sensitivity_parameter": args.sensitivity_parameter,
+                "sensitivity_value": args.sensitivity_value,
+                "macro_beta_min": args.macro_beta_min,
+                "macro_beta_max": args.macro_beta_max,
+                "macro_pcr": args.macro_pcr,
+                "macro_mahal_q": args.macro_mahal_q,
+            }
+            if args.experiment_mode == "sensitivity"
+            else {}
+        ),
         "benchmark": args.benchmark,
         "function_name": function_name,
         "optimizer_name": optimizer_name,
@@ -1889,8 +2001,10 @@ def plot_ablation_fitness_runtime_tradeoff(
 ):
     """Plot cache/run-derived mean runtime against mean final fitness."""
     fig, axes = _ablation_panel_grid(function_names)
+    subplot_annotations = []
     for axis, function_name in zip(axes, function_names):
         optimizer_data = results_struct.get(function_name, {})
+        plotted_points = []
         for optimizer_name in optimizer_order:
             data = optimizer_data.get(optimizer_name, {})
             mean_runtime, _ = _mean_and_sample_sd(data.get("runtime_runs", []))
@@ -1906,13 +2020,51 @@ def plot_ablation_fitness_runtime_tradeoff(
                 linewidth=0.7,
                 zorder=3,
             )
-            axis.annotate(
+            plotted_points.append((optimizer_name, mean_runtime, mean_fitness))
+
+        # Keep a small amount of room for labels without materially changing
+        # the fitness/runtime comparison.
+        axis.margins(x=0.08, y=0.08)
+        x_min, x_max = axis.get_xlim()
+        y_min, y_max = axis.get_ylim()
+        x_span = max(abs(x_max - x_min), np.finfo(float).eps)
+        y_span = max(abs(y_max - y_min), np.finfo(float).eps)
+        normalized_points = []
+        annotations = []
+        vertical_offsets = (6, -8, 18, -20, 30, -32)
+        for optimizer_name, mean_runtime, mean_fitness in plotted_points:
+            x_fraction = (mean_runtime - x_min) / x_span
+            y_fraction = (mean_fitness - y_min) / y_span
+            close_index = sum(
+                abs(x_fraction - previous_x) <= 0.10
+                and abs(y_fraction - previous_y) <= 0.08
+                for previous_x, previous_y in normalized_points
+            )
+            normalized_points.append((x_fraction, y_fraction))
+
+            if x_fraction >= 0.72:
+                horizontal_direction = -1
+            elif x_fraction <= 0.28:
+                horizontal_direction = 1
+            else:
+                horizontal_direction = 1 if close_index % 2 == 0 else -1
+            horizontal_offset = horizontal_direction * (
+                6 + min(close_index, 3) * 2
+            )
+            vertical_offset = vertical_offsets[
+                close_index % len(vertical_offsets)
+            ]
+            annotation = axis.annotate(
                 display_optimizer_name(optimizer_name),
                 (mean_runtime, mean_fitness),
-                xytext=(5, 5),
+                xytext=(horizontal_offset, vertical_offset),
                 textcoords="offset points",
+                ha="left" if horizontal_direction > 0 else "right",
+                va="bottom" if vertical_offset >= 0 else "top",
                 fontsize=8.5,
             )
+            annotations.append(annotation)
+        subplot_annotations.append((axis, annotations))
         axis.set_title(function_name)
         axis.set_xlabel("Mean runtime (s)")
         axis.set_ylabel("Mean final fitness")
@@ -1930,6 +2082,70 @@ def plot_ablation_fitness_runtime_tradeoff(
         )
     fig.suptitle("Ablation Fitness–Runtime Trade-off", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
+
+    # Resolve any remaining close-label collisions in display space and clamp
+    # every label to its own axes. Only annotation offsets are adjusted here.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    points_per_pixel = 72.0 / fig.dpi
+    axes_padding = 2.0
+    label_padding = 1.5
+    for axis, annotations in subplot_annotations:
+        axes_box = axis.get_window_extent(renderer=renderer)
+        placed_boxes = []
+        for annotation_index, annotation in enumerate(annotations):
+            label_box = annotation.get_window_extent(renderer=renderer)
+            step = label_box.height + 3.0
+            direction = 1.0 if annotation_index % 2 == 0 else -1.0
+            vertical_candidates = (
+                0.0,
+                direction * step,
+                -direction * step,
+                direction * 2.0 * step,
+                -direction * 2.0 * step,
+                direction * 3.0 * step,
+                -direction * 3.0 * step,
+            )
+            selected_box = None
+            selected_shift = (0.0, 0.0)
+            for vertical_shift in vertical_candidates:
+                candidate_box = label_box.translated(0.0, vertical_shift)
+                horizontal_shift = 0.0
+                if candidate_box.x0 < axes_box.x0 + axes_padding:
+                    horizontal_shift = axes_box.x0 + axes_padding - candidate_box.x0
+                elif candidate_box.x1 > axes_box.x1 - axes_padding:
+                    horizontal_shift = axes_box.x1 - axes_padding - candidate_box.x1
+                candidate_box = candidate_box.translated(horizontal_shift, 0.0)
+
+                clamp_vertical_shift = 0.0
+                if candidate_box.y0 < axes_box.y0 + axes_padding:
+                    clamp_vertical_shift = axes_box.y0 + axes_padding - candidate_box.y0
+                elif candidate_box.y1 > axes_box.y1 - axes_padding:
+                    clamp_vertical_shift = axes_box.y1 - axes_padding - candidate_box.y1
+                candidate_box = candidate_box.translated(0.0, clamp_vertical_shift)
+
+                overlaps = any(
+                    candidate_box.x0 < placed_box.x1 + label_padding
+                    and candidate_box.x1 > placed_box.x0 - label_padding
+                    and candidate_box.y0 < placed_box.y1 + label_padding
+                    and candidate_box.y1 > placed_box.y0 - label_padding
+                    for placed_box in placed_boxes
+                )
+                selected_box = candidate_box
+                selected_shift = (
+                    horizontal_shift,
+                    vertical_shift + clamp_vertical_shift,
+                )
+                if not overlaps:
+                    break
+
+            offset_x, offset_y = annotation.get_position()
+            annotation.set_position((
+                offset_x + selected_shift[0] * points_per_pixel,
+                offset_y + selected_shift[1] * points_per_pixel,
+            ))
+            placed_boxes.append(selected_box)
+
     fig.savefig(out_path, dpi=600)
     plt.close(fig)
     return out_path
@@ -2172,6 +2388,7 @@ def run_overlap_diagnostic(args):
 def export_results(
     results_struct,
     out_path,
+    include_run_data=False,
 ):
 
     rows = []
@@ -2200,10 +2417,51 @@ def export_results(
         columns=["Function", "Optimizer", "Statistic", "Fitness"],
     )
 
-    df.to_excel(
-        out_path,
-        index=False,
-    )
+    if not include_run_data:
+        df.to_excel(
+            out_path,
+            index=False,
+        )
+        return df
+
+    runtime_rows = []
+    convergence_rows = []
+    for function_name, optimizer_data in results_struct.items():
+        for optimizer_name, data in optimizer_data.items():
+            runtimes = np.asarray(data["runtime_runs"], dtype=float)
+            runtime_statistics = (
+                ("BEST", np.min(runtimes)),
+                ("WORST", np.max(runtimes)),
+                ("MEAN", np.mean(runtimes)),
+                ("SD", np.std(runtimes)),
+            )
+            for statistic, runtime in runtime_statistics:
+                runtime_rows.append({
+                    "Function": function_name,
+                    "Optimizer": optimizer_name,
+                    "Statistic": statistic,
+                    "Runtime": runtime,
+                })
+            for iteration, fitness in enumerate(data["curve"], start=1):
+                convergence_rows.append({
+                    "Function": function_name,
+                    "Optimizer": optimizer_name,
+                    "Iteration": iteration,
+                    "Mean Fitness": fitness,
+                })
+
+    with pd.ExcelWriter(out_path) as writer:
+        df.to_excel(writer, sheet_name="Fitness", index=False)
+        pd.DataFrame(runtime_rows).to_excel(
+            writer,
+            sheet_name="Runtime",
+            index=False,
+        )
+        pd.DataFrame(convergence_rows).to_excel(
+            writer,
+            sheet_name="Convergence",
+            index=False,
+        )
 
     return df
 
@@ -2555,7 +2813,8 @@ def run_experiment(args):
         source_args.exp_id = args.reuse_cache_from_exp_id
         source_paths = make_paths(source_args, create=False)
     cache_signature = build_cache_signature(args)
-    optimizer_colors = build_optimizer_colors(args.optimizers)
+    optimizer_order = comparison_optimizer_order(args)
+    optimizer_colors = build_optimizer_colors(optimizer_order)
     function_map = discover_benchmark_functions(
         args.benchmark,
         args.dims,
@@ -2597,7 +2856,7 @@ def run_experiment(args):
         f"Functions      : {selected_functions}"
     )
     print(
-        f"Optimizers     : {args.optimizers}"
+        f"Optimizers     : {optimizer_order}"
     )
     print(
         f"Dimensions     : {args.dims}"
@@ -2715,16 +2974,18 @@ def run_experiment(args):
         print("=" * 60)
         results_struct[function_name] = {}
         curves_plot = {}
-        for optimizer_index, optimizer_name in enumerate(
-            args.optimizers,
+        for optimizer_index, optimizer_configuration in enumerate(
+            optimizer_experiment_configurations(args),
             start=1,
         ):
+            optimizer_label, optimizer_name, optimizer_args = optimizer_configuration
+            optimizer_cache_signature = build_cache_signature(optimizer_args)
 
             try:
                 print_status(
-                    f"OPTIMIZER {optimizer_index}/{len(args.optimizers)} | "
+                    f"OPTIMIZER {optimizer_index}/{len(optimizer_order)} | "
                     f"function={function_name} | "
-                    f"optimizer={optimizer_name}"
+                    f"optimizer={optimizer_label}"
                 )
                 fitness_runs = []
                 runtime_runs = []
@@ -2735,7 +2996,7 @@ def run_experiment(args):
 
                 resolved_optimizer = resolve_optimizer_name(optimizer_name)
                 if (
-                    args.compute_device in GPU_MODES
+                    optimizer_args.compute_device in GPU_MODES
                     and resolved_optimizer in CUSTOM_OPTIMIZERS
                     and not supports_gpu_batching(optimizer_name)
                 ):
@@ -2744,18 +3005,18 @@ def run_experiment(args):
                         "using the CPU MEALPY solve lifecycle"
                     )
 
-                for run in range(args.runs):
-                    seed = args.seed_base + run
+                for run in range(optimizer_args.runs):
+                    seed = optimizer_args.seed_base + run
                     checkpoint_path = run_checkpoint_path(
                         paths,
-                        cache_signature,
+                        optimizer_cache_signature,
                         function_name,
                         optimizer_name,
                         run,
                     )
                     metadata = checkpoint_metadata(
-                        args,
-                        cache_signature,
+                        optimizer_args,
+                        optimizer_cache_signature,
                         function_name,
                         optimizer_name,
                         run,
@@ -2768,7 +3029,7 @@ def run_experiment(args):
 
                     cached_output = None
                     cache_origin = None
-                    if args.reuse_cache:
+                    if optimizer_args.reuse_cache:
                         cached_output = load_run_checkpoint(
                             checkpoint_path,
                             metadata,
@@ -2778,7 +3039,7 @@ def run_experiment(args):
                         elif source_paths is not None:
                             source_checkpoint_path = run_checkpoint_path(
                                 source_paths,
-                                cache_signature,
+                                optimizer_cache_signature,
                                 function_name,
                                 optimizer_name,
                                 run,
@@ -2818,32 +3079,32 @@ def run_experiment(args):
                         if cache_origin == "current":
                             print_status(
                                 f"CACHE HIT CURRENT | function={function_name} | "
-                                f"optimizer={optimizer_name} | "
-                                f"run={run + 1}/{args.runs}"
+                                f"optimizer={optimizer_label} | "
+                                f"run={run + 1}/{optimizer_args.runs}"
                             )
 
                 if pending_runs:
                     mode_had_pending_runs = True
                     print_status(
                         f"CACHE MISS | function={function_name} | "
-                        f"optimizer={optimizer_name} | "
-                        f"runs={len(pending_runs)}/{args.runs}"
+                        f"optimizer={optimizer_label} | "
+                        f"runs={len(pending_runs)}/{optimizer_args.runs}"
                     )
 
                 if len(pending_runs) == 0:
                     print_status(
                         f"CACHE COMPLETE | function={function_name} | "
-                        f"optimizer={optimizer_name} | "
-                        f"runs={args.runs}/{args.runs}"
+                        f"optimizer={optimizer_label} | "
+                        f"runs={optimizer_args.runs}/{optimizer_args.runs}"
                     )
 
                 if (
                     pending_runs
-                    and cpu_batching_enabled(args)
+                    and cpu_batching_enabled(optimizer_args)
                     and supports_gpu_batching(optimizer_name)
                 ):
-                    if function_name not in args.vectorized_cpu_objectives:
-                        initialize_verified_gpu_objectives(args, [function_name])
+                    if function_name not in optimizer_args.vectorized_cpu_objectives:
+                        initialize_verified_gpu_objectives(optimizer_args, [function_name])
                     actual_batch_size = len(pending_runs)
                     print_status(
                         f"CPU BATCHING | function={function_name} | "
@@ -2854,7 +3115,7 @@ def run_experiment(args):
                         execute_gpu_batches(
                             function_name,
                             optimizer_name,
-                            args,
+                            optimizer_args,
                             pending_runs,
                             checkpoint_records,
                             objective_executor=objective_executor,
@@ -2863,32 +3124,32 @@ def run_experiment(args):
                     )
                 elif (
                     pending_runs
-                    and args.compute_device == "gpu"
-                    and optimizer_uses_gpu(optimizer_name, args.compute_device)
+                    and optimizer_args.compute_device == "gpu"
+                    and optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device)
                 ):
                     print_status(
                         f"STRICT GPU POOL | function={function_name} | "
                         f"optimizer={optimizer_name} | pending_runs={len(pending_runs)} | "
-                        f"gpu_workers={min(args.gpu_workers, len(pending_runs))}"
+                        f"gpu_workers={min(optimizer_args.gpu_workers, len(pending_runs))}"
                     )
                     completed.extend(
                         execute_strict_gpu_pool(
                             strict_gpu_executor,
                             function_name,
                             optimizer_name,
-                            args,
+                            optimizer_args,
                             pending_runs,
                             checkpoint_records,
                         )
                     )
-                elif pending_runs and optimizer_uses_gpu(optimizer_name, args.compute_device):
-                    actual_batch_size = min(args.resolved_gpu_batch_size, len(pending_runs))
-                    if args.gpu_batch_size == "auto" and args.gpu_auto_calibration == "yes":
+                elif pending_runs and optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device):
+                    actual_batch_size = min(optimizer_args.resolved_gpu_batch_size, len(pending_runs))
+                    if optimizer_args.gpu_batch_size == "auto" and optimizer_args.gpu_auto_calibration == "yes":
                         actual_batch_size, _ = calibrate_gpu_batch_size(
                             function_name,
                             optimizer_name,
-                            args,
-                            min(args.estimated_gpu_batch_capacity, len(pending_runs)),
+                            optimizer_args,
+                            min(optimizer_args.estimated_gpu_batch_capacity, len(pending_runs)),
                             objective_executor,
                         )
                     print_status(
@@ -2900,7 +3161,7 @@ def run_experiment(args):
                         execute_gpu_batches(
                             function_name,
                             optimizer_name,
-                            args,
+                            optimizer_args,
                             pending_runs,
                             checkpoint_records,
                             objective_executor=objective_executor,
@@ -2908,14 +3169,14 @@ def run_experiment(args):
                         )
                     )
                 elif (
-                    args.parallel == "yes"
+                    optimizer_args.parallel == "yes"
                     and len(pending_runs) > 1
-                    and args.compute_device != "gpu"
-                    and not optimizer_uses_gpu(optimizer_name, args.compute_device)
+                    and optimizer_args.compute_device != "gpu"
+                    and not optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device)
                 ):
 
                     tasks = []
-                    worker_args = cpu_worker_args(args)
+                    worker_args = cpu_worker_args(optimizer_args)
 
                     for run in pending_runs:
                         checkpoint_path, metadata = checkpoint_records[
@@ -2927,13 +3188,13 @@ def run_experiment(args):
                             "function_name": function_name,
                             "optimizer_name": optimizer_name,
                             "args": worker_args,
-                            "seed": args.seed_base + run,
-                            "total_runs": args.runs,
+                            "seed": optimizer_args.seed_base + run,
+                            "total_runs": optimizer_args.runs,
                             "checkpoint_path": checkpoint_path,
                             "metadata": metadata,
                         })
 
-                    active_cpu_workers = min(args.n_workers, len(tasks))
+                    active_cpu_workers = min(optimizer_args.n_workers, len(tasks))
                     print_status(
                         f"SUBMITTED | function={function_name} | "
                         f"optimizer={optimizer_name} | "
@@ -2948,7 +3209,7 @@ def run_experiment(args):
                         # run workers.
                         "initializer": initialize_objective_worker,
                     }
-                    if args.compute_device in GPU_MODES:
+                    if optimizer_args.compute_device in GPU_MODES:
                         # CUDA was initialized in the controller. Spawn avoids
                         # inheriting that context into CPU-only child processes.
                         executor_kwargs["mp_context"] = multiprocessing.get_context("spawn")
@@ -2971,8 +3232,8 @@ def run_experiment(args):
                             )
                             print_status(
                                 f"PROGRESS | function={function_name} | "
-                                f"optimizer={optimizer_name} | "
-                                f"completed_runs={len(completed)}/{args.runs}"
+                                f"optimizer={optimizer_label} | "
+                                f"completed_runs={len(completed)}/{optimizer_args.runs}"
                             )
 
                 else:
@@ -2983,10 +3244,10 @@ def run_experiment(args):
                         output = run_single(
                             function_name,
                             optimizer_name,
-                            args,
-                            args.seed_base + run,
+                            optimizer_args,
+                            optimizer_args.seed_base + run,
                             run,
-                            args.runs,
+                            optimizer_args.runs,
                         )
 
                         save_run_checkpoint(
@@ -2996,8 +3257,8 @@ def run_experiment(args):
                         )
                         print_status(
                             f"CHECKPOINT SAVED | function={function_name} | "
-                            f"optimizer={optimizer_name} | "
-                            f"run={run + 1}/{args.runs} | "
+                            f"optimizer={optimizer_label} | "
+                            f"run={run + 1}/{optimizer_args.runs} | "
                             f"path={checkpoint_path}"
                         )
                         completed.append(
@@ -3032,24 +3293,24 @@ def run_experiment(args):
                         f"{runtime_runs[-1]:.2f}s"
                     )
 
-                if len(completed) != args.runs:
+                if len(completed) != optimizer_args.runs:
                     raise RuntimeError(
-                        f"optimizer produced {len(completed)}/{args.runs} completed runs"
+                        f"optimizer produced {len(completed)}/{optimizer_args.runs} completed runs"
                     )
                 curve_lengths = {len(np.asarray(curve).reshape(-1)) for curve in curves}
-                if curve_lengths != {args.epochs}:
+                if curve_lengths != {optimizer_args.epochs}:
                     raise RuntimeError(
-                        f"invalid convergence lengths: {sorted(curve_lengths)}; expected {args.epochs}"
+                        f"invalid convergence lengths: {sorted(curve_lengths)}; expected {optimizer_args.epochs}"
                     )
                 mean_curve = np.mean(np.stack(curves, axis=0), axis=0)
 
                 curves_plot[
-                    optimizer_name
+                    optimizer_label
                 ] = mean_curve
 
                 results_struct[
                     function_name
-                ][optimizer_name] = {
+                ][optimizer_label] = {
 
                     "fitness_runs": np.array(
                         fitness_runs
@@ -3084,17 +3345,17 @@ def run_experiment(args):
             except Exception as exc:
                 print_status(
                     f"OPTIMIZER FAILED | function={function_name} | "
-                    f"optimizer={optimizer_name} | "
+                    f"optimizer={optimizer_label} | "
                     f"exception={type(exc).__name__}: {exc}"
                 )
                 traceback.print_exc()
                 optimizer_failures.append(
-                    (function_name, optimizer_name, type(exc).__name__, str(exc))
+                    (function_name, optimizer_label, type(exc).__name__, str(exc))
                 )
                 continue
 
 
-        missing_optimizers = [name for name in args.optimizers if name not in curves_plot]
+        missing_optimizers = [name for name in optimizer_order if name not in curves_plot]
         if missing_optimizers:
             for missing_optimizer in missing_optimizers:
                 print_status(
@@ -3138,7 +3399,7 @@ def run_experiment(args):
     ablation_figure_paths = plot_ablation_computational_figures(
         results_struct,
         selected_functions,
-        args.optimizers,
+        optimizer_order,
         optimizer_colors,
         paths,
     )
@@ -3152,6 +3413,7 @@ def run_experiment(args):
     export_results(
         results_struct,
         excel_path,
+        include_run_data=(args.experiment_mode == "sensitivity"),
     )
 
     statistical_excel_path = os.path.join(
@@ -3161,7 +3423,7 @@ def run_experiment(args):
     export_statistical_results(
         results_struct,
         selected_functions,
-        args.optimizers,
+        optimizer_order,
         statistical_excel_path,
     )
 
@@ -3172,7 +3434,7 @@ def run_experiment(args):
     export_friedman_analysis(
         results_struct,
         selected_functions,
-        args.optimizers,
+        optimizer_order,
         args.experiment_mode,
         friedman_excel_path,
     )
