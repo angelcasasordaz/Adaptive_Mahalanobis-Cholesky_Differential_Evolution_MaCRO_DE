@@ -20,7 +20,7 @@ from compute_backend import ComputeBackend
 from objective_evaluation import ObjectiveEvaluator, ObjectiveSpec
 
 
-BATCH_ENGINE_VERSION = "independent-runs-v3-gpu-objective"
+BATCH_ENGINE_VERSION = "independent-runs-v4-parallel-plans"
 BATCHED_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE"})
 _OBJECTIVE_DECISION_CACHE: dict[tuple, tuple[str, dict[str, float]]] = {}
 
@@ -180,6 +180,7 @@ class BatchedDEEngine:
         beta_max: float = 0.8,
         pcr: float = 0.2,
         objective_executor=None,
+        random_plan_executor=None,
         objective_workers: int = 1,
         objective_strategy: str = "auto",
         objective_spec: ObjectiveSpec | None = None,
@@ -215,6 +216,10 @@ class BatchedDEEngine:
             strategy=objective_strategy,
             spec=objective_spec,
         )
+        # Strict-GPU execution can parallelize independent per-run RNG plans
+        # without exposing the objective evaluator to that process pool.
+        # CPU/hybrid callers leave this unset and retain their existing path.
+        self.random_plan_executor = random_plan_executor
         if cec_objective_backend not in {"auto", "opfunu", "numpy", "gpu"}:
             raise ValueError("CEC objective backend must be auto, opfunu, numpy, or gpu")
         self.gpu_objective = gpu_objective
@@ -489,7 +494,7 @@ class BatchedDEEngine:
 
     def _de_random_plan(self, state: BatchedRunState, close: np.ndarray, far: np.ndarray):
         batch_size = len(state.seeds)
-        executor = self.objective_evaluator.executor
+        executor = self.random_plan_executor or self.objective_evaluator.executor
         if (
             isinstance(executor, ProcessPoolExecutor)
             and self.objective_evaluator.workers > 1
@@ -579,7 +584,7 @@ class BatchedDEEngine:
         div_norm = state.algorithm_state["div_norm_cpu"]
         pcr_values = np.clip(self.pcr + 0.25 * (1.0 - div_norm), 0.10, 0.95)
         scale_values = np.clip(0.5 + (1.0 - div_norm), 0.5, 1.5)
-        executor = self.objective_evaluator.executor
+        executor = self.random_plan_executor or self.objective_evaluator.executor
         if (
             isinstance(executor, ProcessPoolExecutor)
             and self.objective_evaluator.workers > 1

@@ -50,7 +50,7 @@ DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
 EXP_ID = 5
 REUSE_CACHE_FROM_EXP_ID = 5
-COMPUTE_DEVICE = "cpu"
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -109,7 +109,6 @@ DEFAULT_OPTIMIZERS = [
     "DBO",
     "DE",
     "DMO",
-    "GA",
     "GWO",
     "HHO",
     "MFO",
@@ -1385,23 +1384,44 @@ def run_strict_gpu_task(task):
         return os.getpid(), completed
     initialize_verified_gpu_objectives(worker_args, [function_name])
     active_batch_size = min(task["active_batch_size"], len(run_indices))
-    if worker_args.gpu_batch_size == "auto" and worker_args.gpu_auto_calibration == "yes":
-        active_batch_size, _ = calibrate_gpu_batch_size(
+    plan_workers = min(
+        worker_args.objective_workers,
+        active_batch_size,
+    )
+    plan_executor = None
+    if plan_workers > 1 and active_batch_size >= 4:
+        plan_executor = ProcessPoolExecutor(
+            max_workers=plan_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=initialize_objective_worker,
+        )
+        print_status(
+            f"STRICT GPU PLAN WORKERS | workers={plan_workers} | "
+            f"cuda_workers=1"
+        )
+    try:
+        if worker_args.gpu_batch_size == "auto" and worker_args.gpu_auto_calibration == "yes":
+            active_batch_size, _ = calibrate_gpu_batch_size(
+                function_name,
+                optimizer_name,
+                worker_args,
+                min(worker_args.estimated_gpu_batch_capacity, len(run_indices)),
+                None,
+                random_plan_executor=plan_executor,
+            )
+        completed = execute_gpu_batches(
             function_name,
             optimizer_name,
             worker_args,
-            min(worker_args.estimated_gpu_batch_capacity, len(run_indices)),
-            None,
+            run_indices,
+            task["checkpoint_records"],
+            objective_executor=None,
+            random_plan_executor=plan_executor,
+            active_batch_size=active_batch_size,
         )
-    completed = execute_gpu_batches(
-        function_name,
-        optimizer_name,
-        worker_args,
-        run_indices,
-        task["checkpoint_records"],
-        objective_executor=None,
-        active_batch_size=active_batch_size,
-    )
+    finally:
+        if plan_executor is not None:
+            plan_executor.shutdown(wait=True)
     return os.getpid(), completed
 
 
@@ -1529,6 +1549,7 @@ def build_batched_engine(
     optimizer_name,
     args,
     objective_executor=None,
+    random_plan_executor=None,
     epochs=None,
 ):
     function_class = args.function_map[function_name]
@@ -1544,6 +1565,7 @@ def build_batched_engine(
         "compute_device": args.compute_device,
         "mahalanobis_q": getattr(reference_optimizer, "mahalanobis_q", args.macro_mahal_q),
         "objective_executor": objective_executor,
+        "random_plan_executor": random_plan_executor,
         "objective_workers": args.objective_workers,
         "objective_strategy": args.objective_evaluation,
         "objective_spec": ObjectiveSpec(
@@ -1661,6 +1683,7 @@ def run_gpu_batch(
     args,
     run_indices,
     objective_executor=None,
+    random_plan_executor=None,
 ):
     """Advance independent runs together in one array-backend controller."""
     engine = build_batched_engine(
@@ -1668,6 +1691,7 @@ def run_gpu_batch(
         optimizer_name,
         args,
         objective_executor=objective_executor,
+        random_plan_executor=random_plan_executor,
     )
     seeds = [args.seed_base + run for run in run_indices]
     for run, seed in zip(run_indices, seeds):
@@ -1701,6 +1725,7 @@ def calibrate_gpu_batch_size(
     args,
     maximum_batch_size,
     objective_executor,
+    random_plan_executor=None,
 ):
     """Measure tiny copied-state runs; experimental seeds and state are untouched."""
     candidates = performance_batch_candidates(maximum_batch_size, args.runs)
@@ -1712,6 +1737,7 @@ def calibrate_gpu_batch_size(
         optimizer_name,
         args,
         objective_executor=objective_executor,
+        random_plan_executor=random_plan_executor,
         epochs=1,
     )
     dispatch_warm.objective_evaluator.calibrate(
@@ -1734,6 +1760,7 @@ def calibrate_gpu_batch_size(
         optimizer_name,
         args,
         objective_executor=objective_executor,
+        random_plan_executor=random_plan_executor,
         epochs=1,
     )
     warm_engine.run([0], [8_000_001])
@@ -1745,6 +1772,7 @@ def calibrate_gpu_batch_size(
             optimizer_name,
             args,
             objective_executor=objective_executor,
+            random_plan_executor=random_plan_executor,
             epochs=args.gpu_calibration_epochs,
         )
         calibration_runs = list(range(candidate))
@@ -1802,6 +1830,7 @@ def execute_gpu_batches(
     pending_runs,
     checkpoint_records,
     objective_executor=None,
+    random_plan_executor=None,
     active_batch_size=None,
 ):
     """Group pending runs, checkpoint results, and recover GPU batches from OOM."""
@@ -1857,6 +1886,7 @@ def execute_gpu_batches(
                     args,
                     run_indices,
                     objective_executor=objective_executor,
+                    random_plan_executor=random_plan_executor,
                 )
             except Exception as exc:
                 if is_gpu_out_of_memory(exc) and args.gpu_batch_size == "auto" and chunk_size > 1:
