@@ -77,7 +77,7 @@ def main():
             initializer=initialize_objective_worker,
         )
 
-    candidates = [value for value in (1, 2, 4, 8, 16, 30) if value <= args.runs]
+    candidates = [value for value in (1, 2, 4, 8, 16, 24, 30) if value <= args.runs]
     rows = []
     try:
         dispatch_warm = BatchedDEEngine(

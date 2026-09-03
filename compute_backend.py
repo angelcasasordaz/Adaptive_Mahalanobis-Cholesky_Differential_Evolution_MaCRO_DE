@@ -112,7 +112,7 @@ def resolve_objective_workers(requested: int | None, cpu_worker_limit: int) -> i
 
 def performance_batch_candidates(memory_capacity: int, pending_runs: int) -> list[int]:
     limit = max(1, min(int(memory_capacity), int(pending_runs)))
-    return sorted({value for value in (1, 2, 4, 8, 16, limit) if value <= limit})
+    return sorted({value for value in (1, 2, 4, 8, 16, 24, limit) if value <= limit})
 
 
 def estimate_effective_batch_size(

@@ -56,7 +56,7 @@ COMPUTE_DEVICE = "gpu"
 # "hybrid"
 # "gpu"
 CPU_WORKERS = None  # Auto-reserve CPU capacity for the OS/user.
-GPU_WORKERS = 1
+GPU_WORKERS = "auto"
 GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
@@ -71,17 +71,12 @@ MACRO_BETA_MAX = 0.8
 MACRO_PCR = 0.2
 MACRO_MAHAL_Q = 0.68
 
-SENSITIVITY_PARAMETER = "mahalanobis_q"
-SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
-
-# SENSITIVITY_PARAMETER = "beta_min"
-# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
-# SENSITIVITY_PARAMETER = "beta_max"
-# SENSITIVITY_VALUES = [0.60, 0.70, 0.80, 0.90]
-# SENSITIVITY_PARAMETER = "pcr"
-# SENSITIVITY_VALUES = [0.10, 0.20, 0.30, 0.40]
-# SENSITIVITY_PARAMETER = "mahalanobis_q"
-# SENSITIVITY_VALUES = [0.50, 0.68, 0.80, 0.90]
+SENSITIVITY_CONFIGS = [
+    ("mahalanobis_q", [0.50, 0.68, 0.80, 0.90]),
+    ("beta_min", [0.10, 0.20, 0.30, 0.40]),
+    ("beta_max", [0.60, 0.70, 0.80, 0.90]),
+    ("pcr", [0.10, 0.20, 0.30, 0.40]),
+]
 
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
 
@@ -267,9 +262,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gpu-workers",
-        type=int,
+        type=str,
         default=GPU_WORKERS,
-        help="Strict-GPU CUDA-owning run workers (currently capped at 1)",
+        help="Strict-GPU CUDA-owning run workers: auto or an integer from 1 to 4",
     )
     parser.add_argument("--gpu-memory-fraction", type=float, default=GPU_MEMORY_FRACTION, help="Maximum fraction of total VRAM available to CuPy's memory pool")
     parser.add_argument("--gpu-batch-size", default=GPU_BATCH_SIZE, help="GPU population batch capacity: auto or a positive integer")
@@ -339,8 +334,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gpu-calibration-epochs must be between 1 and 5")
     if args.cec_gpu_verification_points < 100:
         parser.error("--cec-gpu-verification-points must be at least 100")
-    if args.gpu_workers < 1:
-        parser.error("--gpu-workers must be at least 1")
+    args.gpu_worker_policy = (
+        "auto" if str(args.gpu_workers).strip().lower() == "auto" else "fixed"
+    )
+    if args.gpu_worker_policy == "auto":
+        args.gpu_workers = "auto"
+    else:
+        try:
+            args.gpu_workers = int(args.gpu_workers)
+        except (TypeError, ValueError):
+            parser.error("--gpu-workers must be 'auto' or an integer from 1 to 4")
+        if not 1 <= args.gpu_workers <= 4:
+            parser.error("--gpu-workers must be 'auto' or an integer from 1 to 4")
     if args.overlap_diagnostic_run < 1:
         parser.error("--overlap-diagnostic-run must be at least 1")
     args.experiment_modes = (
@@ -364,16 +369,20 @@ def apply_experiment_mode(args, experiment_mode):
     elif args.experiment_mode == "sensitivity":
         if args.benchmark != "CEC2017":
             raise ValueError("Sensitivity mode supports CEC2017 only")
-        if SENSITIVITY_PARAMETER not in SENSITIVITY_PARAMETER_ATTRIBUTES:
-            raise ValueError(
-                "SENSITIVITY_PARAMETER must be one of: "
-                f"{', '.join(SENSITIVITY_PARAMETER_ATTRIBUTES)}"
-            )
-        if not SENSITIVITY_VALUES:
-            raise ValueError("SENSITIVITY_VALUES must contain at least one value")
+        if not SENSITIVITY_CONFIGS:
+            raise ValueError("SENSITIVITY_CONFIGS must contain at least one group")
+        for parameter, values in SENSITIVITY_CONFIGS:
+            if parameter not in SENSITIVITY_PARAMETER_ATTRIBUTES:
+                raise ValueError(
+                    f"Unknown sensitivity parameter {parameter!r}; expected one of: "
+                    f"{', '.join(SENSITIVITY_PARAMETER_ATTRIBUTES)}"
+                )
+            if not values:
+                raise ValueError(f"Sensitivity group {parameter!r} has no values")
         args.optimizers = ["MaCRO-DE"]
-        args.sensitivity_parameter = SENSITIVITY_PARAMETER
-        args.sensitivity_values = list(SENSITIVITY_VALUES)
+        args.sensitivity_configs = [
+            (parameter, list(values)) for parameter, values in SENSITIVITY_CONFIGS
+        ]
         args.sensitivity_value = None
     elif args.optimizers is None:
         args.optimizers = list(DEFAULT_OPTIMIZERS)
@@ -387,8 +396,9 @@ def comparison_optimizer_order(args):
     if args.experiment_mode != "sensitivity":
         return list(args.optimizers)
     return [
-        sensitivity_optimizer_label(args.sensitivity_parameter, value)
-        for value in args.sensitivity_values
+        sensitivity_optimizer_label(parameter, value)
+        for parameter, values in args.sensitivity_configs
+        for value in values
     ]
 
 
@@ -398,22 +408,22 @@ def optimizer_experiment_configurations(args):
             yield optimizer_name, optimizer_name, args
         return
 
-    parameter_attribute = SENSITIVITY_PARAMETER_ATTRIBUTES[
-        args.sensitivity_parameter
-    ]
-    for value in args.sensitivity_values:
-        variant_args = argparse.Namespace(**vars(args))
-        variant_args.macro_beta_min = MACRO_BETA_MIN
-        variant_args.macro_beta_max = MACRO_BETA_MAX
-        variant_args.macro_pcr = MACRO_PCR
-        variant_args.macro_mahal_q = MACRO_MAHAL_Q
-        setattr(variant_args, parameter_attribute, float(value))
-        variant_args.sensitivity_value = float(value)
-        yield (
-            sensitivity_optimizer_label(args.sensitivity_parameter, value),
-            "MaCRO-DE",
-            variant_args,
-        )
+    for parameter, values in args.sensitivity_configs:
+        parameter_attribute = SENSITIVITY_PARAMETER_ATTRIBUTES[parameter]
+        for value in values:
+            variant_args = argparse.Namespace(**vars(args))
+            variant_args.macro_beta_min = MACRO_BETA_MIN
+            variant_args.macro_beta_max = MACRO_BETA_MAX
+            variant_args.macro_pcr = MACRO_PCR
+            variant_args.macro_mahal_q = MACRO_MAHAL_Q
+            setattr(variant_args, parameter_attribute, float(value))
+            variant_args.sensitivity_parameter = parameter
+            variant_args.sensitivity_value = float(value)
+            yield (
+                sensitivity_optimizer_label(parameter, value),
+                "MaCRO-DE",
+                variant_args,
+            )
 
 def make_paths(args, create=True):
 
@@ -1336,20 +1346,126 @@ def print_status(message):
     )
 
 
-def initialize_strict_gpu_worker(memory_fraction):
+def initialize_strict_gpu_worker(memory_fraction, quiet=False):
     """Create one persistent, process-local CUDA context."""
     logging.disable(logging.INFO)
     initialize_gpu(memory_fraction=memory_fraction)
     configure_local_mealpy_gpu_backend()
-    print_status(
-        f"STRICT GPU WORKER READY | pid={os.getpid()} | "
-        f"memory_fraction={memory_fraction:.3f} | objective_workers=0"
+    if not quiet:
+        print_status(
+            f"STRICT GPU WORKER READY | pid={os.getpid()} | "
+            f"memory_fraction={memory_fraction:.3f} | objective_workers=0"
+        )
+
+
+def _available_host_memory_bytes():
+    """Best-effort host-memory guard without adding a runtime dependency."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return 2 * 1024**3
+
+
+def _gpu_worker_calibration_run(task):
+    """Run one tiny, non-scientific workload in this process-local context."""
+    args, function_name, optimizer_name, seed = task
+    np.random.seed(seed)
+    function_class = args.function_map[function_name]
+    _benchmark, problem = build_problem(function_class, args.dims)
+    optimizer = build_optimizer(optimizer_name, args)
+    result = optimizer.solve(problem, seed=seed)
+    return os.getpid(), float(result.target.fitness)
+
+
+def _gpu_worker_candidates(args, gpu_info, pending_runs):
+    pending_limit = max(1, min(4, int(pending_runs)))
+    # CUDA contexts and imported scientific stacks consume meaningful host and
+    # device memory even before population arrays are allocated.
+    host_limit = max(1, _available_host_memory_bytes() // (768 * 1024**2))
+    vram_budget = min(
+        int(gpu_info.free_memory_bytes),
+        int(gpu_info.total_memory_bytes * args.gpu_memory_fraction),
     )
+    vram_limit = max(1, vram_budget // (512 * 1024**2))
+    limit = max(1, min(pending_limit, host_limit, vram_limit, args.n_workers))
+    return list(range(1, limit + 1))
 
 
-def select_strict_gpu_workers(args, gpu_info):
-    """Cap strict-GPU execution at one persistent CUDA-owning worker."""
-    return 1
+def select_strict_gpu_workers(args, gpu_info, selected_functions):
+    """Measure persistent CUDA-worker throughput for scalar GPU optimizers."""
+    if args.gpu_workers != "auto":
+        return min(int(args.gpu_workers), max(1, args.runs))
+
+    scalar_optimizers = [
+        name for name in args.optimizers
+        if optimizer_uses_gpu(name, "gpu") and not supports_gpu_batching(name)
+    ]
+    # One larger BatchedDEEngine tensor is preferred for MaCRO-DE. Multiple
+    # contexts are considered only when scalar independent-run work exists.
+    if not scalar_optimizers:
+        return 1
+    optimizer_name = next(
+        (name for name in scalar_optimizers if "PSO" in resolve_optimizer_name(name)),
+        scalar_optimizers[0],
+    )
+    function_name = selected_functions[0]
+    candidates = _gpu_worker_candidates(args, gpu_info, args.runs)
+    measurements = []
+    for worker_count in candidates:
+        worker_fraction = args.gpu_memory_fraction / worker_count
+        calibration_args = strict_gpu_worker_args(args)
+        calibration_args.epochs = args.gpu_calibration_epochs
+        calibration_args.gpu_memory_fraction = worker_fraction
+        calibration_runs = max(4, worker_count * 2)
+        try:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=initialize_strict_gpu_worker,
+                initargs=(worker_fraction, True),
+            ) as executor:
+                warm = [
+                    executor.submit(
+                        _gpu_worker_calibration_run,
+                        (calibration_args, function_name, optimizer_name, 8_200_000 + index),
+                    )
+                    for index in range(worker_count * 2)
+                ]
+                for future in warm:
+                    future.result()
+                started = time.perf_counter()
+                measured = [
+                    executor.submit(
+                        _gpu_worker_calibration_run,
+                        (calibration_args, function_name, optimizer_name, 8_300_000 + index),
+                    )
+                    for index in range(calibration_runs)
+                ]
+                for future in measured:
+                    future.result()
+                elapsed = time.perf_counter() - started
+        except Exception as exc:
+            if is_gpu_out_of_memory(exc) or "CUDA" in str(exc).upper():
+                print_status(
+                    f"GPU WORKER TEST | workers={worker_count} | OOM/UNAVAILABLE | skipped"
+                )
+                continue
+            raise
+        throughput = calibration_runs / max(elapsed, 1.0e-12)
+        measurements.append((worker_count, throughput))
+        print_status(
+            f"GPU WORKER TEST | workers={worker_count} | runs/s={throughput:.4f}"
+        )
+    if not measurements:
+        raise RuntimeError("No safe persistent CUDA worker count completed calibration")
+    return max(measurements, key=lambda item: item[1])[0]
 
 
 def strict_gpu_worker_args(args):
@@ -1358,6 +1474,11 @@ def strict_gpu_worker_args(args):
     worker_args.gpu_objectives = {}
     worker_args.gpu_objective_reports = {}
     worker_args.vectorized_cpu_objectives = {}
+    worker_args.gpu_memory_fraction = (
+        args.gpu_memory_fraction / args.gpu_workers
+        if isinstance(args.gpu_workers, int)
+        else args.gpu_memory_fraction
+    )
     return worker_args
 
 
@@ -1434,7 +1555,11 @@ def execute_strict_gpu_pool(
     checkpoint_records,
 ):
     """Distribute run groups across persistent local-CUDA workers."""
-    active_workers = min(args.gpu_workers, len(pending_runs))
+    active_workers = (
+        1
+        if supports_gpu_batching(optimizer_name)
+        else min(args.gpu_workers, len(pending_runs))
+    )
     run_groups = [
         [int(run) for run in group]
         for group in np.array_split(np.asarray(pending_runs, dtype=int), active_workers)
@@ -2143,6 +2268,188 @@ def plot_log_convergence(
         show_markers,
         use_line_styles,
     )
+
+
+def _plot_sensitivity_curve(axis, curve, scale, label, color, linestyle):
+    """Plot one existing mean sensitivity curve using convergence scale rules."""
+    curve = np.asarray(curve, dtype=float)
+    if scale == "exp":
+        plot_curve = np.where(
+            np.isfinite(curve),
+            np.exp(np.clip(curve, -745.0, 709.0)),
+            np.nan,
+        )
+    elif scale == "log":
+        plot_curve = np.where(
+            np.isfinite(curve) & (curve > 0.0),
+            curve,
+            np.nan,
+        )
+    else:
+        plot_curve = curve
+
+    axis.plot(
+        plot_curve,
+        label=label,
+        color=color,
+        linestyle=linestyle,
+        linewidth=2.0,
+        alpha=0.86,
+    )
+
+
+def plot_sensitivity_grouped_convergence(
+    results_struct,
+    function_names,
+    parameter,
+    values,
+    paths,
+):
+    """Plot the four OFAT values for one parameter across the four CEC panels."""
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(14.4, 10.4),
+        squeeze=False,
+        facecolor="white",
+    )
+    colors = plt.get_cmap("tab10")(np.arange(len(values)))
+
+    for axis, function_name in zip(axes.reshape(-1), function_names):
+        curves = {
+            sensitivity_optimizer_label(parameter, value): results_struct[
+                function_name
+            ][sensitivity_optimizer_label(parameter, value)]["curve"]
+            for value in values
+        }
+        scale = resolve_convergence_scale(curves, CONVERGENCE_SCALE)
+        for value_index, value in enumerate(values):
+            label = sensitivity_optimizer_label(parameter, value)
+            _plot_sensitivity_curve(
+                axis,
+                curves[label],
+                scale,
+                f"{value:g}",
+                colors[value_index],
+                LINE_STYLES[value_index % len(LINE_STYLES)],
+            )
+        if scale in ("log", "symlog"):
+            axis.set_yscale(scale)
+        axis.set_xlabel("Iteration")
+        axis.set_ylabel("exp(Fitness)" if scale == "exp" else "Fitness")
+        axis.set_title(function_name)
+        axis.grid(alpha=0.3)
+        axis.legend(title=parameter)
+
+    fig.suptitle(f"Sensitivity Convergence - {parameter}", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out_path = os.path.join(
+        paths.fig_dir,
+        f"Sensitivity_grouped_{parameter}_Convergence.png",
+    )
+    fig.savefig(out_path, dpi=600)
+    plt.close(fig)
+    return out_path
+
+
+def plot_sensitivity_heatmap(
+    results_struct,
+    function_names,
+    parameter,
+    values,
+    paths,
+):
+    """Show raw 30-run final-fitness means colored by within-function rank."""
+    means = np.asarray([
+        [
+            np.mean(
+                np.asarray(
+                    results_struct[function_name][
+                        sensitivity_optimizer_label(parameter, value)
+                    ]["fitness_runs"],
+                    dtype=float,
+                )
+            )
+            for function_name in function_names
+        ]
+        for value in values
+    ])
+    ranks = np.column_stack([
+        rankdata(means[:, column], method="ordinal")
+        for column in range(means.shape[1])
+    ])
+
+    fig, axis = plt.subplots(figsize=(10.8, 5.8), facecolor="white")
+    image = axis.imshow(
+        ranks,
+        cmap="RdYlGn_r",
+        vmin=1,
+        vmax=4,
+        aspect="auto",
+    )
+    axis.set_xticks(np.arange(len(function_names)), function_names)
+    axis.set_yticks(
+        np.arange(len(values)),
+        [f"{parameter}={value:g}" for value in values],
+    )
+    axis.set_xlabel("CEC Function")
+    axis.set_ylabel("Parameter value")
+    axis.set_title(f"Sensitivity Summary - {parameter}")
+
+    for row in range(means.shape[0]):
+        for column in range(means.shape[1]):
+            axis.text(
+                column,
+                row,
+                f"{means[row, column]:.6e}",
+                ha="center",
+                va="center",
+                color="black",
+                fontsize=9,
+            )
+
+    colorbar = fig.colorbar(image, ax=axis, ticks=[1, 2, 3, 4])
+    colorbar.set_label("Rank within CEC function (1 = best)")
+    fig.tight_layout()
+    out_path = os.path.join(
+        paths.fig_dir,
+        f"Sensitivity_summary_{parameter}_Heatmap.png",
+    )
+    fig.savefig(out_path, dpi=600)
+    plt.close(fig)
+    return out_path
+
+
+def plot_sensitivity_summary_figures(
+    results_struct,
+    function_names,
+    sensitivity_configs,
+    paths,
+):
+    if paths.mode != "sensitivity":
+        return []
+
+    figure_paths = []
+    for parameter, values in sensitivity_configs:
+        figure_paths.append(
+            plot_sensitivity_grouped_convergence(
+                results_struct,
+                function_names,
+                parameter,
+                values,
+                paths,
+            )
+        )
+        figure_paths.append(
+            plot_sensitivity_heatmap(
+                results_struct,
+                function_names,
+                parameter,
+                values,
+                paths,
+            )
+        )
+    return figure_paths
 
 
 def _mean_and_sample_sd(values):
@@ -3044,12 +3351,6 @@ def run_experiment(args):
             'Strict GPU RAM-safe mode supports objective_evaluation="auto" '
             'or "serial" only; "process" would create nested CPU worker processes.'
         )
-    if args.compute_device == "gpu" and args.gpu_workers > 1:
-        print(
-            f"Strict GPU RAM-safe limit: requested {args.gpu_workers}, using 1",
-            flush=True,
-        )
-
     # Cache inspection precedes worker pools, GPU initialization, objective
     # verification, and every optimizer solve.
     args.resolved_gpu_batch_size = 1
@@ -3082,18 +3383,26 @@ def run_experiment(args):
 
     gpu_info = None
     strict_gpu_executor = None
+    batched_gpu_executor = None
     if args.compute_device in GPU_MODES:
         gpu_info = initialize_gpu(memory_fraction=args.gpu_memory_fraction)
         if args.compute_device == "gpu":
-            args.gpu_workers = select_strict_gpu_workers(args, gpu_info)
+            args.gpu_workers = select_strict_gpu_workers(
+                args, gpu_info, selected_functions
+            )
             per_worker_memory_fraction = args.gpu_memory_fraction / args.gpu_workers
         else:
             per_worker_memory_fraction = args.gpu_memory_fraction
-        memory_budget = min(
-            gpu_info.free_memory_bytes // args.gpu_workers
+        # BatchedDEEngine uses one full-budget CUDA context even when the
+        # scalar independent-run pool contains multiple contexts.
+        batch_memory_fraction = (
+            args.gpu_memory_fraction
             if args.compute_device == "gpu"
-            else gpu_info.free_memory_bytes,
-            int(gpu_info.total_memory_bytes * per_worker_memory_fraction),
+            else per_worker_memory_fraction
+        )
+        memory_budget = min(
+            gpu_info.free_memory_bytes,
+            int(gpu_info.total_memory_bytes * batch_memory_fraction),
         )
         memory_capacity = estimate_population_batch_size(
             args.pop_size,
@@ -3178,10 +3487,20 @@ def run_experiment(args):
         f"CPU workers    : {args.n_workers}"
     )
     if gpu_info is not None:
-        print(f"GPU workers    : {args.gpu_workers}")
+        print("GPU scheduling          : throughput-optimized")
+        print(f"GPU worker policy       : {args.gpu_worker_policy.upper()}")
+        print(f"GPU workers selected    : {args.gpu_workers}")
+        print(f"GPU batch policy        : {'AUTO' if args.gpu_batch_size == 'auto' else 'FIXED'}")
+        print(f"Effective MaCRO batch   : {args.resolved_gpu_batch_size}")
+        print(f"Host planner workers    : {args.objective_workers}")
+        if args.experiment_mode == "sensitivity":
+            print(f"Sensitivity groups      : {len(args.sensitivity_configs)}")
+            print(
+                "Sensitivity configs     : "
+                f"{sum(len(values) for _, values in args.sensitivity_configs)}"
+            )
         if args.compute_device == "gpu":
-            print("Strict GPU execution path: local persistent CUDA worker")
-            print("GPU run workers selected: 1")
+            print("Strict GPU execution path: local persistent CUDA workers")
             print("Host RAM safety: enabled")
             print(
                 "Per-worker GPU memory cap: "
@@ -3240,14 +3559,6 @@ def run_experiment(args):
             mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize_objective_worker,
         )
-    if args.compute_device == "gpu":
-        strict_gpu_executor = ProcessPoolExecutor(
-            max_workers=args.gpu_workers,
-            mp_context=multiprocessing.get_context("spawn"),
-            initializer=initialize_strict_gpu_worker,
-            initargs=(args.gpu_memory_fraction,),
-        )
-
     results_struct = {}
     optimizer_failures = []
     mode_had_pending_runs = False
@@ -3388,21 +3699,74 @@ def run_experiment(args):
                     and optimizer_args.compute_device == "gpu"
                     and optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device)
                 ):
+                    if supports_gpu_batching(optimizer_name):
+                        if batched_gpu_executor is None:
+                            batched_gpu_executor = ProcessPoolExecutor(
+                                max_workers=1,
+                                mp_context=multiprocessing.get_context("spawn"),
+                                initializer=initialize_strict_gpu_worker,
+                                initargs=(optimizer_args.gpu_memory_fraction,),
+                            )
+                        selected_gpu_executor = batched_gpu_executor
+                    else:
+                        if strict_gpu_executor is None:
+                            strict_gpu_executor = ProcessPoolExecutor(
+                                max_workers=optimizer_args.gpu_workers,
+                                mp_context=multiprocessing.get_context("spawn"),
+                                initializer=initialize_strict_gpu_worker,
+                                initargs=(
+                                    optimizer_args.gpu_memory_fraction
+                                    / optimizer_args.gpu_workers,
+                                ),
+                            )
+                        selected_gpu_executor = strict_gpu_executor
+                    active_gpu_workers = (
+                        1 if supports_gpu_batching(optimizer_name)
+                        else min(optimizer_args.gpu_workers, len(pending_runs))
+                    )
                     print_status(
                         f"STRICT GPU POOL | function={function_name} | "
                         f"optimizer={optimizer_name} | pending_runs={len(pending_runs)} | "
-                        f"gpu_workers={min(optimizer_args.gpu_workers, len(pending_runs))}"
+                        f"gpu_workers={active_gpu_workers}"
                     )
-                    completed.extend(
-                        execute_strict_gpu_pool(
-                            strict_gpu_executor,
-                            function_name,
-                            optimizer_name,
-                            optimizer_args,
-                            pending_runs,
-                            checkpoint_records,
-                        )
-                    )
+                    while True:
+                        try:
+                            gpu_outputs = execute_strict_gpu_pool(
+                                selected_gpu_executor,
+                                function_name,
+                                optimizer_name,
+                                optimizer_args,
+                                pending_runs,
+                                checkpoint_records,
+                            )
+                            break
+                        except Exception as exc:
+                            recoverable = (
+                                not supports_gpu_batching(optimizer_name)
+                                and optimizer_args.gpu_worker_policy == "auto"
+                                and optimizer_args.gpu_workers > 1
+                                and is_gpu_out_of_memory(exc)
+                            )
+                            if not recoverable:
+                                raise
+                            old_workers = optimizer_args.gpu_workers
+                            optimizer_args.gpu_workers = max(1, old_workers // 2)
+                            strict_gpu_executor.shutdown(wait=True, cancel_futures=True)
+                            strict_gpu_executor = ProcessPoolExecutor(
+                                max_workers=optimizer_args.gpu_workers,
+                                mp_context=multiprocessing.get_context("spawn"),
+                                initializer=initialize_strict_gpu_worker,
+                                initargs=(
+                                    optimizer_args.gpu_memory_fraction
+                                    / optimizer_args.gpu_workers,
+                                ),
+                            )
+                            selected_gpu_executor = strict_gpu_executor
+                            print_status(
+                                f"GPU WORKER OOM | workers={old_workers} -> "
+                                f"{optimizer_args.gpu_workers} | retrying unchanged runs"
+                            )
+                    completed.extend(gpu_outputs)
                 elif pending_runs and optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device):
                     actual_batch_size = min(optimizer_args.resolved_gpu_batch_size, len(pending_runs))
                     if optimizer_args.gpu_batch_size == "auto" and optimizer_args.gpu_auto_calibration == "yes":
@@ -3656,6 +4020,17 @@ def run_experiment(args):
         objective_executor.shutdown(wait=True)
     if strict_gpu_executor is not None:
         strict_gpu_executor.shutdown(wait=True)
+    if batched_gpu_executor is not None:
+        batched_gpu_executor.shutdown(wait=True)
+
+    sensitivity_figure_paths = []
+    if args.experiment_mode == "sensitivity":
+        sensitivity_figure_paths = plot_sensitivity_summary_figures(
+            results_struct,
+            selected_functions,
+            args.sensitivity_configs,
+            paths,
+        )
 
     ablation_figure_paths = plot_ablation_computational_figures(
         results_struct,
@@ -3717,6 +4092,8 @@ def run_experiment(args):
     print(f"Results: {paths.res_dir}")
     print(f"Statistical results: {statistical_excel_path}")
     print(f"Friedman analysis: {friedman_excel_path}")
+    for figure_path in sensitivity_figure_paths:
+        print(f"Sensitivity figure: {figure_path}")
     for figure_path in ablation_figure_paths:
         print(f"Ablation figure: {figure_path}")
     if args.reuse_cache and not mode_had_pending_runs:
