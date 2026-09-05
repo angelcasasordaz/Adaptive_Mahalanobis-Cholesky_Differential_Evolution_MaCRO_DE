@@ -42,13 +42,14 @@ from gpu_batching import BATCH_ENGINE_VERSION, BatchedDEEngine
 from mealpy_gpu_adapters import (
     configure_local_mealpy_gpu_backend,
     mealpy_gpu_adapter_class,
+    strict_gpu_objective_callable,
     supports_mealpy_gpu_adapter,
 )
 from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 5
+EXP_ID = 7
 REUSE_CACHE_FROM_EXP_ID = 5
 COMPUTE_DEVICE = "gpu"
 # Options:
@@ -62,14 +63,14 @@ GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
     "full",
-    "ablation",
-    "sensitivity",
+    # "ablation",
+    # "sensitivity",
 ]
 
-MACRO_BETA_MIN = 0.2
-MACRO_BETA_MAX = 0.8
-MACRO_PCR = 0.2
-MACRO_MAHAL_Q = 0.68
+MACRO_BETA_MIN = 0.10
+MACRO_BETA_MAX = 0.60
+MACRO_PCR = 0.10
+MACRO_MAHAL_Q = 0.50
 
 SENSITIVITY_CONFIGS = [
     ("mahalanobis_q", [0.50, 0.68, 0.80, 0.90]),
@@ -79,6 +80,7 @@ SENSITIVITY_CONFIGS = [
 ]
 
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
+FULL_TEST_OPTIMIZER = "MaCRO-DE-t"
 
 AVAILABLE_BENCHMARKS = {
     "CEC2005": "opfunu.cec_based.cec2005",
@@ -100,10 +102,11 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     "MaCRO-DE",
+    "MaCRO-DE-t",
     "BRO",
     "DBO",
     "DE",
-    "DMO",
+    "DMOA",
     "GWO",
     "HHO",
     "MFO",
@@ -111,6 +114,7 @@ DEFAULT_OPTIMIZERS = [
     "PSO",
     "SHADE",
     "WOA",
+    "JADE",
     "FLA",
 ]
 ABLATION_OPTIMIZERS = [
@@ -132,15 +136,24 @@ ABLATION_OPTIMIZERS = [
 # ]
 ABLATION_FUNCTIONS = [
     "F12017",
+    "F32017",
     "F82017",
+    "F102017",
     "F152017",
+    "F172017",
     "F242017",
+    "F292017",
 ]
+
 SENSITIVITY_FUNCTIONS = [
     "F12017",
+    "F32017",
     "F82017",
+    "F102017",
     "F152017",
+    "F172017",
     "F242017",
+    "F292017",
 ]
 SENSITIVITY_PARAMETER_ATTRIBUTES = {
     "beta_min": "macro_beta_min",
@@ -168,6 +181,7 @@ OPTIMIZER_COLOR_MAP = {
     "WOA": "#2A9D5B",
     "RIME": "#E3B505",
     "MaCRO-DE": "#3266AD",
+    FULL_TEST_OPTIMIZER: "#D62728",
 }
 CONVERGENCE_SCALE = "log"
 CONVERGENCE_SHOW_MARKERS = True
@@ -216,6 +230,11 @@ def parse_args() -> argparse.Namespace:
         help="Read compatible completed checkpoints from another experiment ID",
     )
     parser.add_argument("--output-root", default=".", help="Root directory for Figures/Results")
+    parser.add_argument(
+        "--internal-convergence-from-cache-only",
+        action="store_true",
+        help="Write only internal MaCRO-DE-t-as-main figures from complete compatible caches; never optimize",
+    )
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
         "--reuse-cache",
@@ -521,11 +540,15 @@ def build_optimizer(
 ):
 
     optimizer_name = resolve_optimizer_name(name)
-    optimizer_class = (
-        mealpy_gpu_adapter_class(optimizer_name)
-        if args.compute_device == "gpu"
-        else None
-    ) or resolve_optimizer_class(name)
+    if args.compute_device == "gpu" and not supports_gpu_batching(name):
+        optimizer_class = mealpy_gpu_adapter_class(optimizer_name)
+        if optimizer_class is None:
+            raise RuntimeError(
+                f"Strict GPU execution has no adapter for optimizer {name!r} "
+                f"(resolved as {optimizer_name!r}); CPU fallback is forbidden"
+            )
+    else:
+        optimizer_class = resolve_optimizer_class(name)
     optimizer_kwargs = optimizer_init_kwargs(
         optimizer_class,
         optimizer_name,
@@ -1379,6 +1402,11 @@ def _gpu_worker_calibration_run(task):
     np.random.seed(seed)
     function_class = args.function_map[function_name]
     _benchmark, problem = build_problem(function_class, args.dims)
+    initialize_verified_gpu_objectives(args, [function_name])
+    require_verified_gpu_cec(args, function_name, optimizer_name)
+    problem["obj_func"] = strict_gpu_objective_callable(
+        args.gpu_objectives[function_name]
+    )
     optimizer = build_optimizer(optimizer_name, args)
     result = optimizer.solve(problem, seed=seed)
     return os.getpid(), float(result.target.fitness)
@@ -1489,6 +1517,7 @@ def run_strict_gpu_task(task):
     optimizer_name = task["optimizer_name"]
     run_indices = task["run_indices"]
     if not supports_gpu_batching(optimizer_name):
+        initialize_verified_gpu_objectives(worker_args, [function_name])
         completed = []
         for run in run_indices:
             checkpoint_path, metadata = task["checkpoint_records"][run]
@@ -1521,8 +1550,9 @@ def run_strict_gpu_task(task):
             f"cuda_workers=1"
         )
     try:
+        objective_backends = {}
         if worker_args.gpu_batch_size == "auto" and worker_args.gpu_auto_calibration == "yes":
-            active_batch_size, _ = calibrate_gpu_batch_size(
+            active_batch_size, selected_backend, _ = calibrate_gpu_batch_size(
                 function_name,
                 optimizer_name,
                 worker_args,
@@ -1530,6 +1560,7 @@ def run_strict_gpu_task(task):
                 None,
                 random_plan_executor=plan_executor,
             )
+            objective_backends[active_batch_size] = selected_backend
         completed = execute_gpu_batches(
             function_name,
             optimizer_name,
@@ -1539,6 +1570,7 @@ def run_strict_gpu_task(task):
             objective_executor=None,
             random_plan_executor=plan_executor,
             active_batch_size=active_batch_size,
+            objective_backends=objective_backends,
         )
     finally:
         if plan_executor is not None:
@@ -1634,6 +1666,13 @@ def run_single(
         function_class,
         args.dims,
     )
+    strict_objective = None
+    if args.compute_device == "gpu":
+        require_verified_gpu_cec(args, function_name, optimizer_name)
+        strict_objective = strict_gpu_objective_callable(
+            args.gpu_objectives[function_name]
+        )
+        problem["obj_func"] = strict_objective
 
     optimizer = build_optimizer(
         optimizer_name,
@@ -1643,6 +1682,18 @@ def run_single(
     t0 = time.time()
     result = optimizer.solve(problem, seed=seed)
     runtime = time.time() - t0
+    if args.compute_device == "gpu":
+        gpu_math = getattr(optimizer, "_gpu_math", None)
+        if gpu_math is None or gpu_math.gpu_operation_count < 1:
+            raise RuntimeError(
+                f"Strict GPU adapter for {optimizer_name} executed no GPU array operations; "
+                "CPU fallback is forbidden"
+            )
+        if strict_objective is None or strict_objective.gpu_call_count < 1:
+            raise RuntimeError(
+                f"Strict GPU run for {optimizer_name} executed no gpu-cec evaluations; "
+                "CPU objective fallback is forbidden"
+            )
     convergence = np.array(
         optimizer.history.list_global_best_fit,
         dtype=float,
@@ -1676,6 +1727,7 @@ def build_batched_engine(
     objective_executor=None,
     random_plan_executor=None,
     epochs=None,
+    objective_backend=None,
 ):
     function_class = args.function_map[function_name]
     benchmark = function_class(ndim=args.dims)
@@ -1700,7 +1752,11 @@ def build_batched_engine(
         ),
         "gpu_objective": args.gpu_objectives.get(function_name),
         "vectorized_cpu_objective": args.vectorized_cpu_objectives.get(function_name),
-        "cec_objective_backend": args.cec_objective_backend,
+        "cec_objective_backend": (
+            args.cec_objective_backend
+            if objective_backend is None
+            else objective_backend
+        ),
     }
     for name in ("wf", "cr", "beta_min", "beta_max", "pcr"):
         if hasattr(reference_optimizer, name):
@@ -1750,7 +1806,11 @@ def initialize_verified_gpu_objectives(args, selected_functions):
             args.vectorized_cpu_objectives[function_name] = cpu_objective
         if args.compute_device not in GPU_MODES:
             continue
-        if args.cec_objective_backend in {"opfunu", "numpy"}:
+        strict_gpu_objective_required = args.compute_device == "gpu"
+        if (
+            args.cec_objective_backend in {"opfunu", "numpy"}
+            and not strict_gpu_objective_required
+        ):
             continue
         objective = CEC2017GpuObjective(function_name, benchmark, backend.xp)
         try:
@@ -1775,6 +1835,31 @@ def initialize_verified_gpu_objectives(args, selected_functions):
         )
         if report.verified:
             args.gpu_objectives[function_name] = objective
+
+
+def require_verified_gpu_cec(args, function_name, optimizer_name):
+    """Require verified gpu-cec for GPU-batched strict-GPU execution."""
+    report = args.gpu_objective_reports.get(function_name)
+    objective = args.gpu_objectives.get(function_name)
+    if report is not None and report.verified and objective is not None:
+        return "gpu"
+
+    if report is None:
+        reason = "verification report unavailable"
+    else:
+        reason = (
+            f"mismatches={report.mismatches} | "
+            f"max_abs={report.max_absolute_error:.6e} | "
+            f"max_rel={report.max_relative_error:.6e}"
+        )
+    print_status(
+        f"STRICT GPU OBJECTIVE VERIFICATION FAILED | function={function_name} | "
+        f"optimizer={optimizer_name} | {reason}"
+    )
+    raise RuntimeError(
+        f"Strict GPU execution requires a verified gpu-cec objective for "
+        f"{function_name}; {reason}"
+    )
 
 
 def _batch_progress_callback(optimizer_name, run_indices, compute_device):
@@ -1809,14 +1894,22 @@ def run_gpu_batch(
     run_indices,
     objective_executor=None,
     random_plan_executor=None,
+    objective_backend=None,
 ):
     """Advance independent runs together in one array-backend controller."""
+    if args.compute_device == "gpu" and supports_gpu_batching(optimizer_name):
+        objective_backend = require_verified_gpu_cec(
+            args,
+            function_name,
+            optimizer_name,
+        )
     engine = build_batched_engine(
         function_name,
         optimizer_name,
         args,
         objective_executor=objective_executor,
         random_plan_executor=random_plan_executor,
+        objective_backend=objective_backend,
     )
     seeds = [args.seed_base + run for run in run_indices]
     for run, seed in zip(run_indices, seeds):
@@ -1834,6 +1927,14 @@ def run_gpu_batch(
         ),
         progress_interval=args.gpu_progress_interval,
     )
+    if args.compute_device == "gpu":
+        if not engine.backend.uses_gpu:
+            raise RuntimeError("Strict GPU batched engine did not use its CUDA backend")
+        if engine.selected_objective_backend != "gpu":
+            raise RuntimeError(
+                f"Strict GPU batched engine selected {engine.selected_objective_backend!r}; "
+                "gpu-cec is required"
+            )
     for run, output in zip(run_indices, outputs):
         print_status(
             "DONE  | "
@@ -1851,94 +1952,148 @@ def calibrate_gpu_batch_size(
     maximum_batch_size,
     objective_executor,
     random_plan_executor=None,
+    candidate_batch_sizes=None,
 ):
-    """Measure tiny copied-state runs; experimental seeds and state are untouched."""
-    candidates = performance_batch_candidates(maximum_batch_size, args.runs)
-    if len(candidates) == 1:
-        return candidates[0], []
-
-    dispatch_warm = build_batched_engine(
-        function_name,
-        optimizer_name,
-        args,
-        objective_executor=objective_executor,
-        random_plan_executor=random_plan_executor,
-        epochs=1,
+    """Select batch size and verified CEC backend by median end-to-end time."""
+    candidates = (
+        performance_batch_candidates(maximum_batch_size, args.runs)
+        if candidate_batch_sizes is None
+        else [
+            int(candidate)
+            for candidate in candidate_batch_sizes
+            if 1 <= int(candidate) <= maximum_batch_size
+        ]
     )
-    dispatch_warm.objective_evaluator.calibrate(
-        dispatch_warm.lb,
-        dispatch_warm.ub,
-        candidates[-1] * args.pop_size,
-    )
-    if dispatch_warm.objective_evaluator.strategy == "process":
-        warm_rng = np.random.default_rng(7_900_001)
-        warm_vectors = warm_rng.uniform(
-            dispatch_warm.lb,
-            dispatch_warm.ub,
-            size=(max(args.objective_workers, 2), args.dims),
-        )
-        dispatch_warm.objective_evaluator.evaluate(warm_vectors)
+    if not candidates:
+        raise ValueError("At least one valid GPU calibration batch size is required")
 
-    # Warm CUDA kernels and objective dispatch outside candidate timings.
-    warm_engine = build_batched_engine(
-        function_name,
-        optimizer_name,
-        args,
-        objective_executor=objective_executor,
-        random_plan_executor=random_plan_executor,
-        epochs=1,
+    strict_gpu_backend = (
+        require_verified_gpu_cec(args, function_name, optimizer_name)
+        if args.compute_device == "gpu" and supports_gpu_batching(optimizer_name)
+        else None
     )
-    warm_engine.run([0], [8_000_001])
+    requested_backend = args.cec_objective_backend
+    if strict_gpu_backend is not None:
+        backends = [strict_gpu_backend]
+    elif requested_backend == "auto":
+        backends = []
+        gpu_report = args.gpu_objective_reports.get(function_name)
+        if (
+            function_name in args.gpu_objectives
+            and gpu_report is not None
+            and gpu_report.verified
+        ):
+            backends.append("gpu")
+        if function_name in args.vectorized_cpu_objectives:
+            backends.append("numpy")
+        if not backends:
+            backends.append("auto")
+    else:
+        backends = [requested_backend]
 
-    measurements = []
-    for candidate in candidates:
-        engine = build_batched_engine(
+    if strict_gpu_backend is None:
+        dispatch_warm = build_batched_engine(
             function_name,
             optimizer_name,
             args,
             objective_executor=objective_executor,
             random_plan_executor=random_plan_executor,
-            epochs=args.gpu_calibration_epochs,
+            epochs=1,
         )
-        calibration_runs = list(range(candidate))
-        calibration_seeds = [8_100_000 + index for index in calibration_runs]
-        try:
-            _, _, elapsed = engine.run(calibration_runs, calibration_seeds)
-        except Exception as exc:
-            if is_gpu_out_of_memory(exc):
-                print_status(
-                    f"AUTO CALIBRATION OOM | function={function_name} | "
-                    f"optimizer={optimizer_name} | batch={candidate} | skipped"
-                )
-                engine.backend.free_cached_blocks()
-                continue
-            raise
-        throughput = candidate / max(elapsed, 1.0e-12)
-        timing = engine.timing.summary()
-        objective_label = (
-            f"gpu-cec:{function_name}"
-            if engine.selected_objective_backend == "gpu"
-            else (
-                f"numpy-cec:{function_name}"
-                if engine.selected_objective_backend == "numpy"
-                else f"opfunu-{engine.objective_evaluator.strategy}"
+        dispatch_warm.objective_evaluator.calibrate(
+            dispatch_warm.lb,
+            dispatch_warm.ub,
+            candidates[-1] * args.pop_size,
+        )
+        if dispatch_warm.objective_evaluator.strategy == "process":
+            warm_rng = np.random.default_rng(7_900_001)
+            warm_vectors = warm_rng.uniform(
+                dispatch_warm.lb,
+                dispatch_warm.ub,
+                size=(max(args.objective_workers, 2), args.dims),
             )
-        )
-        measurements.append((candidate, elapsed, throughput, timing, objective_label))
-        print_status(
-            f"AUTO CALIBRATION | function={function_name} | optimizer={optimizer_name} | "
-            f"batch={candidate} | time={elapsed:.3f}s | runs_per_second={throughput:.4f} | "
-            f"fitness={timing['fitness']:.3f}s | gpu={timing['gpu_kernel']:.3f}s | "
-            f"objective={objective_label}"
-        )
+            dispatch_warm.objective_evaluator.evaluate(warm_vectors)
+
+    measurements = []
+    for candidate in candidates:
+        calibration_runs = list(range(candidate))
+        warmup_seeds = [8_000_000 + index for index in calibration_runs]
+        calibration_seeds = [8_100_000 + index for index in calibration_runs]
+        for backend_name in backends:
+            engine = build_batched_engine(
+                function_name,
+                optimizer_name,
+                args,
+                objective_executor=objective_executor,
+                random_plan_executor=random_plan_executor,
+                epochs=args.gpu_calibration_epochs,
+                objective_backend=backend_name,
+            )
+            try:
+                # One complete unmeasured warm-up for this exact pair.
+                engine.run(calibration_runs, warmup_seeds)
+                elapsed_repetitions = []
+                for _repetition in range(3):
+                    measured_engine = build_batched_engine(
+                        function_name,
+                        optimizer_name,
+                        args,
+                        objective_executor=objective_executor,
+                        random_plan_executor=random_plan_executor,
+                        epochs=args.gpu_calibration_epochs,
+                        objective_backend=backend_name,
+                    )
+                    repetition_started = time.perf_counter()
+                    measured_engine.run(
+                        calibration_runs,
+                        calibration_seeds,
+                    )
+                    measured_engine.backend.synchronize()
+                    elapsed_repetitions.append(
+                        float(time.perf_counter() - repetition_started)
+                    )
+            except Exception as exc:
+                if is_gpu_out_of_memory(exc):
+                    print_status(
+                        f"AUTO CALIBRATION OOM | function={function_name} | "
+                        f"optimizer={optimizer_name} | batch={candidate} | "
+                        f"backend={backend_name} | skipped"
+                    )
+                    engine.backend.free_cached_blocks()
+                    continue
+                raise
+
+            median_elapsed = float(np.median(elapsed_repetitions))
+            throughput = candidate / max(median_elapsed, 1.0e-12)
+            backend_label = {
+                "gpu": "gpu-cec",
+                "numpy": "numpy-cec",
+                "opfunu": "opfunu",
+                "auto": measured_engine.selected_objective_backend,
+            }[backend_name]
+            measurements.append({
+                "batch_size": candidate,
+                "backend": backend_name,
+                "backend_label": backend_label,
+                "median_time": median_elapsed,
+                "runs_per_second": throughput,
+                "repetition_times": tuple(elapsed_repetitions),
+            })
+            print_status(
+                f"AUTO CALIBRATION | function={function_name} | "
+                f"optimizer={optimizer_name} | batch={candidate} | "
+                f"backend={backend_label} | median_time={median_elapsed:.3f}s | "
+                f"runs/s={throughput:.4f}"
+            )
     if not measurements:
         raise RuntimeError("No memory-safe GPU batch candidate completed calibration.")
-    best = max(measurements, key=lambda item: item[2])
+    best = max(measurements, key=lambda item: item["runs_per_second"])
     print_status(
         f"AUTO SELECTED | function={function_name} | optimizer={optimizer_name} | "
-        f"effective_run_batch={best[0]} | runs_per_second={best[2]:.4f}"
+        f"batch={best['batch_size']} | backend={best['backend_label']} | "
+        f"runs/s={best['runs_per_second']:.4f}"
     )
-    return best[0], measurements
+    return best["batch_size"], best["backend"], measurements
 
 
 def _save_gpu_checkpoint_async(run, checkpoint_path, metadata, output):
@@ -1957,6 +2112,7 @@ def execute_gpu_batches(
     objective_executor=None,
     random_plan_executor=None,
     active_batch_size=None,
+    objective_backends=None,
 ):
     """Group pending runs, checkpoint results, and recover GPU batches from OOM."""
     completed = []
@@ -1969,6 +2125,12 @@ def execute_gpu_batches(
     batch_number = 0
     pending_saves = []
     execution_label = "GPU" if args.compute_device in GPU_MODES else "CPU"
+    objective_backends = dict(objective_backends or {})
+    strict_gpu_backend = (
+        require_verified_gpu_cec(args, function_name, optimizer_name)
+        if args.compute_device == "gpu" and supports_gpu_batching(optimizer_name)
+        else None
+    )
 
     def drain_checkpoint_buffer():
         if not pending_saves:
@@ -2004,6 +2166,27 @@ def execute_gpu_batches(
                 f"function={function_name} | optimizer={optimizer_name} | "
                 f"runs={first_run}-{last_run} | size={chunk_size}"
             )
+            objective_backend = (
+                strict_gpu_backend
+                if strict_gpu_backend is not None
+                else objective_backends.get(chunk_size)
+            )
+            if (
+                objective_backend is None
+                and args.compute_device in GPU_MODES
+                and args.gpu_batch_size == "auto"
+                and args.gpu_auto_calibration == "yes"
+            ):
+                _, objective_backend, _ = calibrate_gpu_batch_size(
+                    function_name,
+                    optimizer_name,
+                    args,
+                    chunk_size,
+                    objective_executor,
+                    random_plan_executor=random_plan_executor,
+                    candidate_batch_sizes=[chunk_size],
+                )
+                objective_backends[chunk_size] = objective_backend
             try:
                 batch_outputs, state, elapsed = run_gpu_batch(
                     function_name,
@@ -2012,6 +2195,7 @@ def execute_gpu_batches(
                     run_indices,
                     objective_executor=objective_executor,
                     random_plan_executor=random_plan_executor,
+                    objective_backend=objective_backend,
                 )
             except Exception as exc:
                 if is_gpu_out_of_memory(exc) and args.gpu_batch_size == "auto" and chunk_size > 1:
@@ -2089,6 +2273,18 @@ def cpu_worker_args(args):
     worker_args.gpu_objective_reports = {}
     worker_args.vectorized_cpu_objectives = {}
     return worker_args
+
+
+def should_use_cpu_parallel_executor(optimizer_name, optimizer_args, pending_runs):
+    """Select independent CPU run workers when no GPU execution path exists."""
+    return (
+        optimizer_args.compute_device != "gpu"
+        and
+        optimizer_args.parallel == "yes"
+        and len(pending_runs) > 1
+        and not optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device)
+    )
+
 
 def plot_convergence(
     curves_dict,
@@ -2250,6 +2446,155 @@ def plot_configured_convergence(
         use_line_styles=use_line_styles,
     )
     return selected_scale
+
+
+def plot_full_test_convergence(
+    curves_dict,
+    function_name,
+    paths,
+    optimizer_colors,
+    requested_scale,
+    show_markers,
+    use_line_styles,
+):
+    """Add the FULL comparison that includes the experimental optimizer."""
+    selected_scale = resolve_convergence_scale(curves_dict, requested_scale)
+    if selected_scale is None:
+        return None
+
+    scale_label = {
+        "linear": "",
+        "log": " (Log Scale)",
+        "symlog": " (Symlog Scale)",
+        "exp": " (Exp Scale)",
+    }[selected_scale]
+    out_path = os.path.join(
+        paths.fig_dir,
+        f"{paths.exp_tag}_{function_name}_convergence_{selected_scale}"
+        "_With_MaCRO_DE_t.png",
+    )
+    plot_convergence(
+        curves_dict,
+        f"Convergence Curve - {function_name}{scale_label} - With MaCRO-DE-t",
+        out_path,
+        optimizer_colors,
+        yscale=selected_scale,
+        show_markers=show_markers,
+        use_line_styles=use_line_styles,
+    )
+    return selected_scale
+
+def plot_internal_macro_de_t_as_main(
+    curves_dict,
+    function_name,
+    paths,
+    optimizer_colors,
+    requested_scale,
+    show_markers,
+    use_line_styles,
+):
+    """Internal diagnostic only: substitute plot data, preserving main-plot styles.
+
+    Keep the MaCRO-DE key and its position so the shared renderer preserves its
+    blue emphasis and every other optimizer's style index. Scientific results
+    and the caller's curves are never modified.
+    """
+    if "MaCRO-DE" not in curves_dict or FULL_TEST_OPTIMIZER not in curves_dict:
+        return None
+    diagnostic_curves = {
+        name: curves_dict[FULL_TEST_OPTIMIZER] if name == "MaCRO-DE" else curve
+        for name, curve in curves_dict.items()
+        if name != FULL_TEST_OPTIMIZER
+    }
+    selected_scale = resolve_convergence_scale(diagnostic_curves, requested_scale)
+    if selected_scale is None:
+        return None
+    out_path = os.path.join(
+        paths.fig_dir,
+        f"Convergence_{function_name}_Internal_MaCRO_DE_t_As_Main.png",
+    )
+    plot_convergence(
+        diagnostic_curves,
+        f"Internal Diagnostic - {function_name} - MaCRO-DE-t as MaCRO-DE",
+        out_path,
+        optimizer_colors,
+        yscale=selected_scale,
+        show_markers=show_markers,
+        use_line_styles=use_line_styles,
+    )
+    return out_path
+
+
+def run_internal_convergence_from_cache(args):
+    """Read compatible cached curves and write only the third diagnostic figure.
+
+    Missing/incomplete functions are skipped. This path never enters the
+    experiment runner, initializes a GPU, or writes tables/checkpoints.
+    """
+    if args.experiment_mode != "full":
+        raise ValueError("The internal MaCRO-DE-t-as-main diagnostic requires full comparison mode")
+    if not {"MaCRO-DE", FULL_TEST_OPTIMIZER}.issubset(args.optimizers):
+        raise ValueError("The internal diagnostic requires MaCRO-DE and MaCRO-DE-t")
+    paths = make_paths(args, create=False)
+    search_paths = [paths]
+    if args.reuse_cache_from_exp_id is not None:
+        source_args = argparse.Namespace(**vars(args))
+        source_args.exp_id = args.reuse_cache_from_exp_id
+        search_paths.append(make_paths(source_args, create=False))
+    function_names = args.functions
+    if function_names == ["ALL"]:
+        function_names = sorted({
+            os.path.basename(path)
+            for candidate in search_paths
+            for path in glob.glob(os.path.join(candidate.cache_dir, "*", "F*"))
+            if os.path.isdir(path)
+        })
+    colors = build_optimizer_colors(args.optimizers)
+    written = []
+    for function_name in function_names:
+        curves = {}
+        missing = []
+        for optimizer_name in args.optimizers:
+            signature = build_cache_signature(args, optimizer_name)
+            run_curves = []
+            for run in range(args.runs):
+                expected = {
+                    "benchmark": args.benchmark,
+                    "function_name": function_name,
+                    "optimizer_name": optimizer_name,
+                    "optimizer_parameters": optimizer_scientific_parameters(optimizer_name, args),
+                    "dims": args.dims,
+                    "epochs": args.epochs,
+                    "pop_size": args.pop_size,
+                    "run": run,
+                    "seed": args.seed_base + run,
+                }
+                current = run_checkpoint_path(paths, signature, function_name, optimizer_name, run)
+                matched = compatible_checkpoint_path(
+                    search_paths, current, expected, function_name, optimizer_name, run,
+                )
+                output = load_run_checkpoint(matched, expected) if matched else None
+                if output is None or np.asarray(output["curve"]).shape != (args.epochs,):
+                    break
+                run_curves.append(output["curve"])
+            if len(run_curves) != args.runs:
+                missing.append(optimizer_name)
+            else:
+                curves[optimizer_name] = np.mean(np.stack(run_curves, axis=0), axis=0)
+        if missing:
+            print_status(f"INTERNAL PLOT SKIPPED | {function_name} | incomplete cache: {', '.join(missing)}")
+            continue
+        os.makedirs(paths.fig_dir, exist_ok=True)
+        out_path = plot_internal_macro_de_t_as_main(
+            curves, function_name, paths, colors, CONVERGENCE_SCALE,
+            CONVERGENCE_SHOW_MARKERS, CONVERGENCE_USE_LINE_STYLES,
+        )
+        if out_path is not None:
+            written.append(out_path)
+            print_status(f"INTERNAL PLOT FROM CACHE | {out_path}")
+    print_status(f"INTERNAL CACHE-ONLY PLOTS COMPLETE | written={len(written)} | optimization runs=0")
+    return written
+
 
 def plot_log_convergence(
     curves_dict,
@@ -2452,6 +2797,84 @@ def plot_sensitivity_summary_figures(
     return figure_paths
 
 
+def _sensitivity_value_legend(parameter, value):
+    prefixes = {
+        "mahalanobis_q": "q",
+        "beta_min": "beta_min",
+        "beta_max": "beta_max",
+        "pcr": "pcr",
+    }
+    return f"{prefixes[parameter]}={value:.2f}"
+
+
+def plot_sensitivity_individual_convergence(
+    results_struct,
+    function_name,
+    parameter,
+    values,
+    paths,
+):
+    """Plot one parameter's four existing mean curves for one CEC function."""
+    curves = {
+        sensitivity_optimizer_label(parameter, value): results_struct[
+            function_name
+        ][sensitivity_optimizer_label(parameter, value)]["curve"]
+        for value in values
+    }
+    scale = resolve_convergence_scale(curves, CONVERGENCE_SCALE)
+    colors = plt.get_cmap("tab10")(np.arange(len(values)))
+    fig, axis = plt.subplots(figsize=(10, 5), facecolor="white")
+
+    for value_index, value in enumerate(values):
+        label = sensitivity_optimizer_label(parameter, value)
+        _plot_sensitivity_curve(
+            axis,
+            curves[label],
+            scale,
+            _sensitivity_value_legend(parameter, value),
+            colors[value_index],
+            LINE_STYLES[value_index % len(LINE_STYLES)],
+        )
+    if scale in ("log", "symlog"):
+        axis.set_yscale(scale)
+    axis.set_xlabel("Iteration")
+    axis.set_ylabel("exp(Fitness)" if scale == "exp" else "Fitness")
+    axis.set_title(f"Sensitivity Convergence - {parameter} - {function_name}")
+    axis.grid(alpha=0.3)
+    axis.legend()
+    fig.tight_layout()
+
+    out_path = os.path.join(
+        paths.fig_dir,
+        f"Sensitivity_{parameter}_{function_name}_Convergence.png",
+    )
+    fig.savefig(out_path, dpi=600)
+    plt.close(fig)
+    return out_path
+
+
+def plot_sensitivity_individual_figures(
+    results_struct,
+    function_names,
+    sensitivity_configs,
+    paths,
+):
+    if paths.mode != "sensitivity":
+        return []
+
+    return [
+        plot_sensitivity_individual_convergence(
+            results_struct,
+            function_name,
+            parameter,
+            values,
+            paths,
+        )
+        for parameter, values in sensitivity_configs
+        for function_name in function_names
+    ]
+
+
 def _mean_and_sample_sd(values):
     finite = np.asarray(values, dtype=float).reshape(-1)
     finite = finite[np.isfinite(finite)]
@@ -2644,6 +3067,8 @@ def plot_ablation_runtime_comparison(
     optimizer_order,
     optimizer_colors,
     out_path,
+    reserve_annotation_headroom=False,
+    show_runtime_ratio=True,
 ):
     """Plot mean runtime ± sample SD and the observed DE-M/DE-MC ratio."""
     fig, axes = _ablation_panel_grid(function_names)
@@ -2668,6 +3093,9 @@ def plot_ablation_runtime_comparison(
             linewidth=0.7,
         )
         axis.bar_label(bars, fmt="%.3g", padding=3, fontsize=7.5)
+        if reserve_annotation_headroom:
+            y_min, y_max = axis.get_ylim()
+            axis.set_ylim(y_min, y_max + 0.15 * (y_max - y_min))
         axis.set_xticks(positions, [display_optimizer_name(name) for name in optimizer_order])
         axis.tick_params(axis="x", rotation=30)
         axis.set_ylabel("Runtime (s), mean ± SD")
@@ -2686,21 +3114,80 @@ def plot_ablation_runtime_comparison(
             if np.isfinite(ratio)
             else "DE-M / DE-MC runtime = unavailable"
         )
-        axis.text(
-            0.02,
-            0.97,
-            ratio_text,
-            transform=axis.transAxes,
-            ha="left",
-            va="top",
-            fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "#aaaaaa", "alpha": 0.9},
-        )
+        if show_runtime_ratio:
+            axis.text(
+                0.02,
+                0.97,
+                ratio_text,
+                transform=axis.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                bbox={"facecolor": "white", "edgecolor": "#aaaaaa", "alpha": 0.9},
+            )
     fig.suptitle("Ablation Runtime Comparison", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(out_path, dpi=600)
     plt.close(fig)
     return out_path
+
+
+def plot_ablation_individual_tradeoff_figures(
+    results_struct,
+    function_names,
+    optimizer_order,
+    optimizer_colors,
+    paths,
+):
+    """Save one trade-off figure per function from the combined plot's data."""
+    if paths.mode != "ablation":
+        return []
+
+    figure_paths = []
+    for function_name in function_names:
+        out_path = os.path.join(
+            paths.fig_dir,
+            f"Ablation_Fitness_Runtime_Tradeoff_{function_name}.png",
+        )
+        plot_ablation_fitness_runtime_tradeoff(
+            results_struct,
+            [function_name],
+            optimizer_order,
+            optimizer_colors,
+            out_path,
+        )
+        figure_paths.append(out_path)
+    return figure_paths
+
+
+def plot_ablation_individual_runtime_figures(
+    results_struct,
+    function_names,
+    optimizer_order,
+    optimizer_colors,
+    paths,
+):
+    """Save one runtime-comparison figure per function from the combined data."""
+    if paths.mode != "ablation":
+        return []
+
+    figure_paths = []
+    for function_name in function_names:
+        out_path = os.path.join(
+            paths.fig_dir,
+            f"Ablation_Runtime_Comparison_{function_name}.png",
+        )
+        plot_ablation_runtime_comparison(
+            results_struct,
+            [function_name],
+            optimizer_order,
+            optimizer_colors,
+            out_path,
+            reserve_annotation_headroom=True,
+            show_runtime_ratio=False,
+        )
+        figure_paths.append(out_path)
+    return figure_paths
 
 
 def plot_ablation_computational_figures(
@@ -2737,7 +3224,26 @@ def plot_ablation_computational_figures(
         optimizer_colors,
         runtime_path,
     )
-    return [tradeoff_path, runtime_path]
+    individual_tradeoff_paths = plot_ablation_individual_tradeoff_figures(
+        results_struct,
+        function_names,
+        optimizer_order,
+        optimizer_colors,
+        paths,
+    )
+    individual_runtime_paths = plot_ablation_individual_runtime_figures(
+        results_struct,
+        function_names,
+        optimizer_order,
+        optimizer_colors,
+        paths,
+    )
+    return [
+        tradeoff_path,
+        runtime_path,
+        *individual_tradeoff_paths,
+        *individual_runtime_paths,
+    ]
 
 
 def plot_overlap_diagnostic(
@@ -3270,8 +3776,16 @@ def validate_optimizer_list(args):
     width = max((len(str(name)) for name in args.optimizers), default=1)
     for optimizer_name in args.optimizers:
         try:
-            resolve_optimizer_name(optimizer_name)
+            resolved_name = resolve_optimizer_name(optimizer_name)
             resolve_optimizer_class(optimizer_name)
+            if (
+                args.compute_device == "gpu"
+                and not supports_gpu_batching(optimizer_name)
+                and not supports_mealpy_gpu_adapter(resolved_name)
+            ):
+                raise ValueError(
+                    f"no strict GPU adapter for resolved optimizer {resolved_name!r}"
+                )
         except (ImportError, AttributeError, TypeError, ValueError) as exc:
             invalid.append((optimizer_name, str(exc)))
             print(f"{optimizer_name:<{width}} : INVALID / unknown optimizer")
@@ -3350,6 +3864,11 @@ def run_experiment(args):
         raise ValueError(
             'Strict GPU RAM-safe mode supports objective_evaluation="auto" '
             'or "serial" only; "process" would create nested CPU worker processes.'
+        )
+    if args.compute_device == "gpu" and args.cec_objective_backend not in {"auto", "gpu"}:
+        raise ValueError(
+            "Strict GPU execution requires --cec-objective-backend auto or gpu; "
+            "opfunu/numpy CPU objective routing is forbidden"
         )
     # Cache inspection precedes worker pools, GPU initialization, objective
     # verification, and every optimizer solve.
@@ -3524,7 +4043,7 @@ def run_experiment(args):
         print(f"Objective evaluation    : {args.objective_evaluation.upper()}")
         if args.compute_device == "gpu":
             print("GPU objective verification: worker-local")
-            print("CPU objective fallback     : worker-local, unchanged")
+            print("CPU objective fallback     : FORBIDDEN")
         else:
             verified_names = sorted(args.gpu_objectives)
             fallback_names = [name for name in selected_functions if name not in args.gpu_objectives]
@@ -3606,8 +4125,8 @@ def run_experiment(args):
                     and not supports_gpu_batching(optimizer_name)
                 ):
                     print_status(
-                        f"GPU BATCH UNSUPPORTED | optimizer={optimizer_name} | "
-                        "using the CPU MEALPY solve lifecycle"
+                        f"STRICT GPU SCALAR ADAPTER | optimizer={optimizer_name} | "
+                        "using the GPU-backed MEALPY solve lifecycle"
                     )
 
                 for run in range(optimizer_args.runs):
@@ -3769,14 +4288,16 @@ def run_experiment(args):
                     completed.extend(gpu_outputs)
                 elif pending_runs and optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device):
                     actual_batch_size = min(optimizer_args.resolved_gpu_batch_size, len(pending_runs))
+                    objective_backends = {}
                     if optimizer_args.gpu_batch_size == "auto" and optimizer_args.gpu_auto_calibration == "yes":
-                        actual_batch_size, _ = calibrate_gpu_batch_size(
+                        actual_batch_size, selected_backend, _ = calibrate_gpu_batch_size(
                             function_name,
                             optimizer_name,
                             optimizer_args,
                             min(optimizer_args.estimated_gpu_batch_capacity, len(pending_runs)),
                             objective_executor,
                         )
+                        objective_backends[actual_batch_size] = selected_backend
                     print_status(
                         f"GPU BATCHING | function={function_name} | "
                         f"optimizer={optimizer_name} | pending_runs={len(pending_runs)} | "
@@ -3791,13 +4312,13 @@ def run_experiment(args):
                             checkpoint_records,
                             objective_executor=objective_executor,
                             active_batch_size=actual_batch_size,
+                            objective_backends=objective_backends,
                         )
                     )
-                elif (
-                    optimizer_args.parallel == "yes"
-                    and len(pending_runs) > 1
-                    and optimizer_args.compute_device != "gpu"
-                    and not optimizer_uses_gpu(optimizer_name, optimizer_args.compute_device)
+                elif should_use_cpu_parallel_executor(
+                    optimizer_name,
+                    optimizer_args,
+                    pending_runs,
                 ):
 
                     tasks = []
@@ -3862,6 +4383,11 @@ def run_experiment(args):
                             )
 
                 else:
+                    if pending_runs and optimizer_args.compute_device == "gpu":
+                        raise RuntimeError(
+                            f"Strict GPU routing failed for {optimizer_name}; "
+                            "CPU fallback is forbidden"
+                        )
                     for run in pending_runs:
                         checkpoint_path, metadata = checkpoint_records[
                             run
@@ -3990,9 +4516,18 @@ def run_experiment(args):
                 f"PLOT DEFERRED | {function_name} | incomplete optimizer set"
             )
         elif len(curves_plot) > 0:
-            audit_convergence_curves(curves_plot, function_name)
+            original_curves = (
+                {
+                    optimizer_name: curve
+                    for optimizer_name, curve in curves_plot.items()
+                    if optimizer_name != FULL_TEST_OPTIMIZER
+                }
+                if args.experiment_mode == "full"
+                else curves_plot
+            )
+            audit_convergence_curves(original_curves, function_name)
             main_scale = plot_configured_convergence(
-                curves_plot,
+                original_curves,
                 function_name,
                 paths,
                 optimizer_colors,
@@ -4000,14 +4535,33 @@ def run_experiment(args):
                 CONVERGENCE_SHOW_MARKERS,
                 CONVERGENCE_USE_LINE_STYLES,
             )
+            if args.experiment_mode == "full":
+                plot_full_test_convergence(
+                    curves_plot,
+                    function_name,
+                    paths,
+                    optimizer_colors,
+                    CONVERGENCE_SCALE,
+                    CONVERGENCE_SHOW_MARKERS,
+                    CONVERGENCE_USE_LINE_STYLES,
+                )
+                plot_internal_macro_de_t_as_main(
+                    curves_plot,
+                    function_name,
+                    paths,
+                    optimizer_colors,
+                    CONVERGENCE_SCALE,
+                    CONVERGENCE_SHOW_MARKERS,
+                    CONVERGENCE_USE_LINE_STYLES,
+                )
             if args.convergence_extra_scale != "none":
                 extra_scale = resolve_convergence_scale(
-                    curves_plot,
+                    original_curves,
                     args.convergence_extra_scale,
                 )
                 if extra_scale is not None and extra_scale != main_scale:
                     plot_configured_convergence(
-                        curves_plot,
+                        original_curves,
                         function_name,
                         paths,
                         optimizer_colors,
@@ -4015,6 +4569,16 @@ def run_experiment(args):
                         CONVERGENCE_SHOW_MARKERS,
                         CONVERGENCE_USE_LINE_STYLES,
                     )
+                    if args.experiment_mode == "full":
+                        plot_full_test_convergence(
+                            curves_plot,
+                            function_name,
+                            paths,
+                            optimizer_colors,
+                            extra_scale,
+                            CONVERGENCE_SHOW_MARKERS,
+                            CONVERGENCE_USE_LINE_STYLES,
+                        )
 
     if objective_executor is not None:
         objective_executor.shutdown(wait=True)
@@ -4030,6 +4594,14 @@ def run_experiment(args):
             selected_functions,
             args.sensitivity_configs,
             paths,
+        )
+        sensitivity_figure_paths.extend(
+            plot_sensitivity_individual_figures(
+                results_struct,
+                selected_functions,
+                args.sensitivity_configs,
+                paths,
+            )
         )
 
     ablation_figure_paths = plot_ablation_computational_figures(
@@ -4112,6 +4684,10 @@ def experiment_configurations(args):
 def main():
 
     args = parse_args()
+    if args.internal_convergence_from_cache_only:
+        apply_experiment_mode(args, "full")
+        run_internal_convergence_from_cache(args)
+        return
     if args.overlap_diagnostic_function is not None:
         diagnostic_args = argparse.Namespace(**vars(args))
         apply_experiment_mode(diagnostic_args, args.experiment_modes[0])

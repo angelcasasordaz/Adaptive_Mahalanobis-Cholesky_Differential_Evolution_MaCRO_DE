@@ -138,6 +138,7 @@ class BatchTiming:
             "covariance", "factorization_inverse", "mahalanobis",
             "classification", "mutation", "crossover", "selection", "history_store", "awad",
             "mutation_boundary", "trial_boundary",
+            "random_plan_gpu", "adaptive_history_store",
         }
         transfer_keys = {"classification_transfer", "trial_download", "fitness_upload", "history_transfer", "adaptive_transfer"}
         result = dict(self.totals)
@@ -199,6 +200,7 @@ class BatchedDEEngine:
         self.pop_size = int(pop_size)
         self.backend = ComputeBackend(compute_device)
         self.xp = self.backend.xp
+        self._device_macro = self.backend.uses_gpu and optimizer_name in {"MaCRO-DE", "DE-MC-CF"}
         self.lb_backend = self.backend.asarray(self.lb)
         self.ub_backend = self.backend.asarray(self.ub)
         self.wf = float(wf)
@@ -250,6 +252,8 @@ class BatchedDEEngine:
 
     def _device_plan_buffer(self, name: str, host: np.ndarray):
         """Upload into stable device storage without a per-generation allocation."""
+        if self.backend.uses_gpu and isinstance(host, self.xp.ndarray):
+            return host
         if not self.backend.uses_gpu:
             return host
         buffer = self._device_plan_buffers.get(name)
@@ -266,10 +270,10 @@ class BatchedDEEngine:
 
     def _stage(self, name: str, function):
         if self.backend.uses_gpu:
-            event_index = len(self._pending_gpu_events)
-            if event_index == len(self._gpu_event_pool):
-                self._gpu_event_pool.append((self.xp.cuda.Event(), self.xp.cuda.Event()))
-            start, end = self._gpu_event_pool[event_index]
+            if self._gpu_event_pool:
+                start, end = self._gpu_event_pool.pop()
+            else:
+                start, end = self.xp.cuda.Event(), self.xp.cuda.Event()
             start.record()
             result = function()
             end.record()
@@ -280,13 +284,18 @@ class BatchedDEEngine:
         self.timing.add(name, perf_counter() - started)
         return result
 
-    def _flush_gpu_events(self) -> float:
+    def _flush_gpu_events(self, ready_only=False) -> float:
         elapsed_total = 0.0
+        completed = 0
         for name, start, end in self._pending_gpu_events:
+            if ready_only and not end.done:
+                break
             seconds = float(self.xp.cuda.get_elapsed_time(start, end)) / 1000.0
             self.timing.add(name, seconds)
             elapsed_total += seconds
-        self._pending_gpu_events.clear()
+            self._gpu_event_pool.append((start, end))
+            completed += 1
+        del self._pending_gpu_events[:completed]
         return elapsed_total
 
     def _initial_positions(self, seeds: Sequence[int]) -> np.ndarray:
@@ -295,6 +304,11 @@ class BatchedDEEngine:
         batches = []
         for seed in seeds:
             bounds_rng = np.random.default_rng(seed)
+            if self._device_macro:
+                # Same contiguous draw order and float64 uniform arithmetic as
+                # the individual calls; no 1,500-call initialization loop.
+                batches.append(bounds_rng.uniform(self.lb, self.ub, size=(self.pop_size, self.n_dims)))
+                continue
             batches.append(
                 np.asarray(
                     [bounds_rng.uniform(self.lb, self.ub) for _ in range(self.pop_size)],
@@ -469,6 +483,15 @@ class BatchedDEEngine:
                 pcr_history=[[] for _ in seeds],
                 fmean_history=[[] for _ in seeds],
             )
+        if self._device_macro:
+            from macro_gpu_random import MacroRandomPlan
+            state.algorithm_state["device_random_plan"] = MacroRandomPlan(
+                self.xp, state.generators, self.pop_size, self.n_dims
+            )
+            if self.optimizer_name == "MaCRO-DE":
+                state.algorithm_state["adaptive_history_buffer"] = self.xp.empty(
+                    (len(seeds), self.epochs, 4), dtype=self.xp.float64
+                )
         return state
 
     def _classification(self, positions, method: str, threshold: float):
@@ -485,6 +508,8 @@ class BatchedDEEngine:
             lambda: self.backend.distances_from_factor(positions, factor, factor_kind),
         )
         close = self._stage("classification", lambda: distances <= threshold)
+        if self._device_macro:
+            return close, ~close, distances
         started = perf_counter()
         close_cpu = self.backend.to_cpu(close).astype(bool, copy=False)
         transfer_wall = perf_counter() - started
@@ -685,7 +710,18 @@ class BatchedDEEngine:
             threshold = self.macro_threshold if self.optimizer_name == "MaCRO-DE" else self.threshold
         close, far, _ = self._classification(state.positions, method, threshold)
 
-        if self.optimizer_name == "MaCRO-DE":
+        if self._device_macro:
+            donors, crossover, f_vectors, pcr_values = self._stage(
+                "random_plan_gpu",
+                lambda: state.algorithm_state["device_random_plan"].generate(
+                    close, state.algorithm_state["div_norm_for_update"], self
+                ),
+            )
+            factors = f_vectors if self.optimizer_name == "MaCRO-DE" else self.wf
+            mutants = self._stage(
+                "mutation", lambda: self._gather_mutants(state.positions, donors, factors)
+            )
+        elif self.optimizer_name == "MaCRO-DE":
             started = perf_counter()
             donors, crossover, f_vectors, pcr_values = self._macro_random_plan(state, close, far)
             self.timing.add("donor_construction", perf_counter() - started)
@@ -748,14 +784,20 @@ class BatchedDEEngine:
             algo["div_max_seen"] = self.xp.maximum(algo["div_max_seen"], div_awad)
             div_norm = self.xp.clip(div_awad / (algo["div_max_seen"] + 1.0e-9), 0.0, 1.0)
             algo["div_norm_for_update"] = div_norm
-            started = perf_counter()
-            adaptive_values = self.backend.to_cpu(self.xp.stack((div_awad, div_norm), axis=1))
-            transfer_wall = perf_counter() - started
-            pending_gpu = self._flush_gpu_events() if self.backend.uses_gpu else 0.0
-            self.timing.add("adaptive_transfer", max(0.0, transfer_wall - pending_gpu))
-            algo["div_norm_cpu"] = adaptive_values[:, 1].copy()
+            if not self._device_macro:
+                started = perf_counter()
+                adaptive_values = self.backend.to_cpu(self.xp.stack((div_awad, div_norm), axis=1))
+                transfer_wall = perf_counter() - started
+                pending_gpu = self._flush_gpu_events() if self.backend.uses_gpu else 0.0
+                self.timing.add("adaptive_transfer", max(0.0, transfer_wall - pending_gpu))
+                algo["div_norm_cpu"] = adaptive_values[:, 1].copy()
 
-        if self.optimizer_name == "MaCRO-DE":
+        if self._device_macro and self.optimizer_name == "MaCRO-DE":
+            self._stage("adaptive_history_store", lambda: algo["adaptive_history_buffer"].__setitem__(
+                (slice(None), epoch - 1),
+                self.xp.stack((div_awad, div_norm, pcr_values, algo["device_random_plan"].mean()), axis=1),
+            ))
+        elif self.optimizer_name == "MaCRO-DE":
             algo = state.algorithm_state
             fmean = np.mean(f_vectors, axis=(1, 2))
             for run_offset in range(len(state.seeds)):
@@ -766,10 +808,10 @@ class BatchedDEEngine:
 
         if epoch == 1 and state.capture_trace:
             state.trace.update(
-                close_masks=close.copy(),
-                far_masks=far.copy(),
-                donor_indices=donors.copy(),
-                crossover_masks=crossover.copy(),
+                close_masks=self.backend.to_cpu(close).copy(),
+                far_masks=self.backend.to_cpu(far).copy(),
+                donor_indices=self.backend.to_cpu(donors).copy(),
+                crossover_masks=self.backend.to_cpu(crossover).copy(),
                 trial_population=self.backend.to_cpu(trial),
                 trial_fitness=self.backend.to_cpu(trial_fitness),
                 first_generation_population=self.backend.to_cpu(state.positions),
@@ -777,9 +819,11 @@ class BatchedDEEngine:
                 first_generation_best=self.backend.to_cpu(state.best_fitness),
             )
             if self.optimizer_name == "MaCRO-DE":
-                state.trace["f_vectors"] = f_vectors.copy()
-                state.trace["pcr_values"] = pcr_values.copy()
+                state.trace["f_vectors"] = self.backend.to_cpu(f_vectors).copy()
+                state.trace["pcr_values"] = self.backend.to_cpu(pcr_values).copy()
         self.timing.epochs += 1
+        if self._device_macro:
+            self._flush_gpu_events(ready_only=True)
         self.timing.add("epoch_total", perf_counter() - epoch_started)
 
     def run(
@@ -823,7 +867,8 @@ class BatchedDEEngine:
                     self.backend.memory_stats(),
                 )
         state.stopped[:] = True
-        elapsed = perf_counter() - started
+        run_started = started
+        elapsed = perf_counter() - run_started
         started_transfer = perf_counter()
         histories = self.backend.to_cpu(
             self.xp.stack(
@@ -841,6 +886,14 @@ class BatchedDEEngine:
         state.current_histories = [row[1].astype(float, copy=False).tolist() for row in histories]
         best_positions = self.backend.to_cpu(state.best_positions)
         best_fitness = self.backend.to_cpu(state.best_fitness)
+        if self._device_macro:
+            state.algorithm_state["device_random_plan"].export_states(state.generators)
+            state.algorithm_state["div_norm_cpu"] = self.backend.to_cpu(state.algorithm_state["div_norm_for_update"])
+            if self.optimizer_name == "MaCRO-DE":
+                adaptive = self.backend.to_cpu(state.algorithm_state["adaptive_history_buffer"])
+                for index, name in enumerate(("div_awad_history", "div_norm_history", "pcr_history", "fmean_history")):
+                    state.algorithm_state[name] = adaptive[:, :, index].tolist()
+            elapsed = perf_counter() - run_started
         outputs = []
         for offset, _run_index in enumerate(state.run_indices):
             output = {

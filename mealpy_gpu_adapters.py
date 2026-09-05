@@ -8,13 +8,20 @@ from __future__ import annotations
 
 import numpy as np
 from mealpy.evolutionary_based.DE import OriginalDE
+from mealpy.evolutionary_based.DE import JADE
 from mealpy.evolutionary_based.SHADE import OriginalSHADE
 from mealpy.human_based.BRO import OriginalBRO
+from mealpy.physics_based.FLA import OriginalFLA
+from mealpy.swarm_based.DMOA import OriginalDMOA
+from mealpy.swarm_based.GWO import OriginalGWO
 from mealpy.swarm_based.HHO import OriginalHHO
+from mealpy.swarm_based.MFO import OriginalMFO
+from mealpy.swarm_based.MGO import OriginalMGO
 from mealpy.swarm_based.PSO import OriginalPSO
 from mealpy.swarm_based.WOA import OriginalWOA
 
 from compute_backend import ComputeBackend, GPUBackendError
+from dbo_optimizer import DBOOptimizer
 
 
 _LOCAL_GPU_WORKER_BACKEND = None
@@ -26,6 +33,26 @@ def configure_local_mealpy_gpu_backend(device_id=0) -> None:
     _LOCAL_GPU_WORKER_BACKEND = ComputeBackend("gpu", device_id=device_id)
 
 
+def strict_gpu_objective_callable(gpu_objective):
+    """Adapt a verified vectorized CUDA objective to MEALPY's scalar API."""
+    if _LOCAL_GPU_WORKER_BACKEND is None or not _LOCAL_GPU_WORKER_BACKEND.uses_gpu:
+        raise GPUBackendError("Strict GPU objective requires an initialized CUDA worker")
+    verification = getattr(gpu_objective, "verification", None)
+    if verification is None or not verification.verified:
+        raise GPUBackendError("Strict GPU objective must pass runtime verification")
+
+    def evaluate(solution):
+        device_solution = _LOCAL_GPU_WORKER_BACKEND.asarray(solution)
+        device_value = gpu_objective.evaluate(device_solution)
+        _LOCAL_GPU_WORKER_BACKEND.synchronize()
+        evaluate.gpu_call_count += 1
+        return float(np.asarray(_LOCAL_GPU_WORKER_BACKEND.to_cpu(device_value)))
+
+    evaluate.gpu_cec = True
+    evaluate.gpu_call_count = 0
+    return evaluate
+
+
 class _ArrayMathExecutor:
     """Execute ordered NumPy-compatible operations on the worker-local GPU."""
 
@@ -33,13 +60,17 @@ class _ArrayMathExecutor:
         _ = gpu_memory_fraction
         self.requested_device = str(compute_device).lower()
         if self.requested_device == "gpu":
-            if _LOCAL_GPU_WORKER_BACKEND is None:
+            if (
+                _LOCAL_GPU_WORKER_BACKEND is None
+                or not _LOCAL_GPU_WORKER_BACKEND.uses_gpu
+            ):
                 raise GPUBackendError(
                     "MEALPY GPU adapters require the initialized strict-GPU worker backend"
                 )
             self.backend = _LOCAL_GPU_WORKER_BACKEND
         else:
             self.backend = ComputeBackend("cpu", device_id=gpu_device_id)
+        self.gpu_operation_count = 0
 
     def array_operation(self, kind, name, method, args, kwargs):
         if not self.backend.uses_gpu:
@@ -65,6 +96,7 @@ class _ArrayMathExecutor:
             if kind == "ufunc"
             else target(*device_args, **kwargs)
         )
+        self.gpu_operation_count += 1
 
         def host_value(value):
             if isinstance(value, tuple):
@@ -76,6 +108,9 @@ class _ArrayMathExecutor:
     def _resolve_gpu_operation(self, name):
         xp = self.backend.xp
         target = getattr(xp, name, None)
+        if target is not None:
+            return target
+        target = getattr(xp.linalg, name, None)
         if target is not None:
             return target
         from cupyx.scipy import special
@@ -193,10 +228,46 @@ class GPUOriginalBRO(_MEALPYGPUAdapter, OriginalBRO):
         return self.get_idx_min__(np.asarray(distances))
 
 
+class GPUDBO(_MEALPYGPUAdapter, DBOOptimizer):
+    def _positions(self, pop):
+        return _GPUArray(np.asarray([agent.solution for agent in pop]), self._gpu_math)
+
+
+class GPUOriginalDMOA(_MEALPYGPUAdapter, OriginalDMOA):
+    pass
+
+
+class GPUOriginalGWO(_MEALPYGPUAdapter, OriginalGWO):
+    pass
+
+
+class GPUOriginalMFO(_MEALPYGPUAdapter, OriginalMFO):
+    pass
+
+
+class GPUOriginalMGO(_MEALPYGPUAdapter, OriginalMGO):
+    pass
+
+
+class GPUJADE(_MEALPYGPUAdapter, JADE):
+    pass
+
+
+class GPUOriginalFLA(_MEALPYGPUAdapter, OriginalFLA):
+    pass
+
+
 _GPU_ADAPTERS = {
+    "DBO": GPUDBO,
+    "JADE": GPUJADE,
     "OriginalBRO": GPUOriginalBRO,
     "OriginalDE": GPUOriginalDE,
+    "OriginalDMOA": GPUOriginalDMOA,
+    "OriginalFLA": GPUOriginalFLA,
+    "OriginalGWO": GPUOriginalGWO,
     "OriginalHHO": GPUOriginalHHO,
+    "OriginalMFO": GPUOriginalMFO,
+    "OriginalMGO": GPUOriginalMGO,
     "OriginalPSO": GPUOriginalPSO,
     "OriginalSHADE": GPUOriginalSHADE,
     "OriginalWOA": GPUOriginalWOA,
