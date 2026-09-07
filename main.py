@@ -51,7 +51,7 @@ DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
 EXP_ID = 7
 REUSE_CACHE_FROM_EXP_ID = 5
-COMPUTE_DEVICE = "gpu"
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -2511,11 +2511,11 @@ def plot_internal_macro_de_t_as_main(
         return None
     out_path = os.path.join(
         paths.fig_dir,
-        f"Convergence_{function_name}_Internal_MaCRO_DE_t_As_Main.png",
+        f"Convergence_{function_name}_Internal_MaCRO_DE_t_As_Original.png",
     )
     plot_convergence(
         diagnostic_curves,
-        f"Internal Diagnostic - {function_name} - MaCRO-DE-t as MaCRO-DE",
+        f"Convergence Curve - {function_name} (Log Scale)",
         out_path,
         optimizer_colors,
         yscale=selected_scale,
