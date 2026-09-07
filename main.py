@@ -49,9 +49,9 @@ from objective_evaluation import ObjectiveSpec, initialize_objective_worker
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 7
-REUSE_CACHE_FROM_EXP_ID = 5
-COMPUTE_DEVICE = "cpu"
+EXP_ID = 8
+REUSE_CACHE_FROM_EXP_ID = 8
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -62,10 +62,20 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    "full",
+    # "full",
     # "ablation",
+    "distance_ablation",
     # "sensitivity",
 ]
+
+DISTANCE_ABLATION_METRICS = [
+    "chebyshev",
+    "euclidean",
+    "mahalanobis_cholesky",
+    "manhattan",
+    "minkowski",
+]
+DISTANCE_ABLATION_MINKOWSKI_P = 3.0
 
 MACRO_BETA_MIN = 0.10
 MACRO_BETA_MAX = 0.60
@@ -235,6 +245,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write only internal MaCRO-DE-t-as-main figures from complete compatible caches; never optimize",
     )
+    parser.add_argument(
+        "--distance-ablation-from-cache-only", "--distance-ablation-figures-only",
+        dest="distance_ablation_from_cache_only", action="store_true",
+        help="Regenerate distance-ablation data, summary and figures from complete caches; never optimize",
+    )
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
         "--reuse-cache",
@@ -257,13 +272,13 @@ def parse_args() -> argparse.Namespace:
     mode_group.add_argument(
         "--experiment-modes",
         nargs="+",
-        choices=["full", "ablation", "sensitivity"],
+        choices=["full", "ablation", "distance_ablation", "sensitivity"],
         default=None,
         help="Experiment modes to execute sequentially (default: EXPERIMENT_MODES)",
     )
     mode_group.add_argument(
         "--experiment-mode",
-        choices=["full", "ablation", "sensitivity"],
+        choices=["full", "ablation", "distance_ablation", "sensitivity"],
         default=None,
         help="Execute one experiment mode (backward-compatible alias)",
     )
@@ -385,6 +400,17 @@ def apply_experiment_mode(args, experiment_mode):
 
     if args.experiment_mode == "ablation":
         args.optimizers = list(ABLATION_OPTIMIZERS)
+    elif getattr(args, "experiment_mode", None) == "distance_ablation":
+        from distance_metrics import DISTANCE_LABELS, validate_metric
+        if args.benchmark != "CEC2017" or args.dims != 30:
+            raise ValueError("Distance ablation requires CEC2017 and D=30")
+        if ABLATION_FUNCTIONS is None or len(ABLATION_FUNCTIONS) != 8:
+            raise ValueError("Distance ablation requires the existing eight ABLATION_FUNCTIONS")
+        if list(DISTANCE_ABLATION_METRICS) != list(DISTANCE_LABELS):
+            raise ValueError("Distance ablation requires all five configured metrics in order")
+        for metric in DISTANCE_ABLATION_METRICS:
+            validate_metric(metric, DISTANCE_ABLATION_MINKOWSKI_P)
+        args.optimizers = ["MaCRO-DE"]
     elif args.experiment_mode == "sensitivity":
         if args.benchmark != "CEC2017":
             raise ValueError("Sensitivity mode supports CEC2017 only")
@@ -412,6 +438,9 @@ def sensitivity_optimizer_label(parameter, value):
 
 
 def comparison_optimizer_order(args):
+    if getattr(args, "experiment_mode", None) == "distance_ablation":
+        from distance_metrics import DISTANCE_LABELS
+        return [DISTANCE_LABELS[metric] for metric in DISTANCE_ABLATION_METRICS]
     if args.experiment_mode != "sensitivity":
         return list(args.optimizers)
     return [
@@ -422,6 +451,14 @@ def comparison_optimizer_order(args):
 
 
 def optimizer_experiment_configurations(args):
+    if getattr(args, "experiment_mode", None) == "distance_ablation":
+        from distance_metrics import DISTANCE_LABELS
+        for metric in DISTANCE_ABLATION_METRICS:
+            variant_args = argparse.Namespace(**vars(args))
+            variant_args.distance_metric = metric
+            variant_args.distance_minkowski_p = DISTANCE_ABLATION_MINKOWSKI_P
+            yield DISTANCE_LABELS[metric], "MaCRO-DE", variant_args
+        return
     if args.experiment_mode != "sensitivity":
         for optimizer_name in args.optimizers:
             yield optimizer_name, optimizer_name, args
@@ -555,6 +592,13 @@ def build_optimizer(
         args,
     )
 
+    metric = getattr(args, "distance_metric", "mahalanobis_cholesky")
+    if getattr(args, "experiment_mode", None) == "distance_ablation" and metric != "mahalanobis_cholesky":
+        from macro_de_distance_variants import MaCRO_DE_Distance
+        return MaCRO_DE_Distance(
+            distance_metric=metric, minkowski_p=args.distance_minkowski_p,
+            **optimizer_kwargs,
+        )
     return optimizer_class(**optimizer_kwargs)
 
 def display_optimizer_name(name):
@@ -768,6 +812,18 @@ def optimizer_scientific_parameters(optimizer_name, args):
     }
     if canonical_name == "DE-MC-CF":
         parameters["implementation_revision"] = DE_MC_CF_IMPLEMENTATION_REVISION
+    if getattr(args, "experiment_mode", None) == "distance_ablation":
+        from distance_metrics import DISTANCE_IMPLEMENTATION_REVISION
+        parameters.update(
+            distance_metric=args.distance_metric,
+            distance_revision=DISTANCE_IMPLEMENTATION_REVISION,
+            distance_backend=args.compute_device,
+            distance_execution="batched" if (
+                args.compute_device in GPU_MODES or cpu_batching_enabled(args)
+            ) else "scalar",
+        )
+        if args.distance_metric == "minkowski":
+            parameters["minkowski_p"] = args.distance_minkowski_p
     return parameters
 
 
@@ -796,17 +852,6 @@ def build_cache_signature(args, optimizer_name):
 
 
 def select_experiment_functions(args, function_map):
-    if args.experiment_mode == "sensitivity":
-        requested = list(SENSITIVITY_FUNCTIONS)
-        missing = [name for name in requested if name not in function_map]
-        if missing:
-            raise ValueError(
-                "Unknown CEC2017 sensitivity function(s): "
-                f"{', '.join(missing)}. Available functions: "
-                f"{', '.join(function_map)}"
-            )
-        return requested
-
     if args.experiment_mode == "ablation" and args.benchmark == "CEC2017":
         requested = (
             list(function_map)
@@ -817,6 +862,23 @@ def select_experiment_functions(args, function_map):
         if missing:
             raise ValueError(
                 "Unknown CEC2017 ablation function(s): "
+                f"{', '.join(missing)}. Available functions: "
+                f"{', '.join(function_map)}"
+            )
+        return requested
+
+    if getattr(args, "experiment_mode", None) == "distance_ablation":
+        requested = list(ABLATION_FUNCTIONS)
+        missing = [name for name in requested if name not in function_map]
+        if missing:
+            raise ValueError(f"Missing distance-ablation functions: {missing}")
+        return requested
+    if args.experiment_mode == "sensitivity":
+        requested = list(SENSITIVITY_FUNCTIONS)
+        missing = [name for name in requested if name not in function_map]
+        if missing:
+            raise ValueError(
+                "Unknown CEC2017 sensitivity function(s): "
                 f"{', '.join(missing)}. Available functions: "
                 f"{', '.join(function_map)}"
             )
@@ -1761,6 +1823,12 @@ def build_batched_engine(
     for name in ("wf", "cr", "beta_min", "beta_max", "pcr"):
         if hasattr(reference_optimizer, name):
             kwargs[name] = getattr(reference_optimizer, name)
+    metric = getattr(args, "distance_metric", "mahalanobis_cholesky")
+    if getattr(args, "experiment_mode", None) == "distance_ablation" and metric != "mahalanobis_cholesky":
+        from macro_de_distance_variants import BatchedMaCRODistance
+        return BatchedMaCRODistance(
+            distance_metric=metric, minkowski_p=args.distance_minkowski_p, **kwargs
+        )
     return BatchedDEEngine(**kwargs)
 
 
@@ -3859,6 +3927,12 @@ def audit_checkpoint_cache(args, paths, source_paths, selected_functions):
 
 
 def run_experiment(args):
+    if getattr(args, "experiment_mode", None) == "distance_ablation" and getattr(
+        args, "distance_ablation_from_cache_only", False
+    ):
+        from distance_ablation_reporting import regenerate_from_checkpoints
+        regenerate_from_checkpoints(args)
+        return
 
     if args.compute_device == "gpu" and args.objective_evaluation == "process":
         raise ValueError(
@@ -4472,6 +4546,8 @@ def run_experiment(args):
                     ),
 
                     "curve": mean_curve,
+                    **({"curves_runs": np.stack(curves)}
+                       if getattr(args, "experiment_mode", None) == "distance_ablation" else {}),
                 }
 
                 print("-" * 50)
@@ -4515,7 +4591,7 @@ def run_experiment(args):
             print_status(
                 f"PLOT DEFERRED | {function_name} | incomplete optimizer set"
             )
-        elif len(curves_plot) > 0:
+        elif len(curves_plot) > 0 and args.experiment_mode != "distance_ablation":
             original_curves = (
                 {
                     optimizer_name: curve
@@ -4586,6 +4662,13 @@ def run_experiment(args):
         strict_gpu_executor.shutdown(wait=True)
     if batched_gpu_executor is not None:
         batched_gpu_executor.shutdown(wait=True)
+
+    if getattr(args, "experiment_mode", None) == "distance_ablation":
+        if optimizer_failures:
+            raise RuntimeError(f"Distance ablation incomplete: {optimizer_failures}")
+        from distance_ablation_reporting import export_distance_ablation
+        export_distance_ablation(results_struct, selected_functions, args, paths)
+        return
 
     sensitivity_figure_paths = []
     if args.experiment_mode == "sensitivity":
@@ -4684,6 +4767,12 @@ def experiment_configurations(args):
 def main():
 
     args = parse_args()
+    if args.distance_ablation_from_cache_only:
+        if not args.reuse_cache:
+            raise ValueError("Distance cache-only mode requires --reuse-cache")
+        apply_experiment_mode(args, "distance_ablation")
+        run_experiment(args)
+        return
     if args.internal_convergence_from_cache_only:
         apply_experiment_mode(args, "full")
         run_internal_convergence_from_cache(args)
