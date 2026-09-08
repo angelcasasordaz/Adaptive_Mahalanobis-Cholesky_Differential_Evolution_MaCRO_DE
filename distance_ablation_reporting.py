@@ -3,7 +3,6 @@ import argparse
 import json
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
@@ -19,24 +18,26 @@ def plot_archive(archive_path, figure_dir):
         means = data["mean_fitness"]
         evaluations = data["function_evaluations"]
         labels = data["labels"]
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for index, (label, curve) in enumerate(zip(labels, means)):
-        ax.plot(evaluations, curve, label=str(label),
-                color=plt.get_cmap("tab10")(index),
-                marker=("o", "s", "^", "D", "X")[index],
-                markevery=max(1, len(curve) // 18), markersize=4, linewidth=1.5)
-    # Match the project's raw CEC fitness convention, including CEC bias.
-    ax.set_yscale("log" if np.all(means > 0) else "symlog")
-    ax.set(title=f"CEC2017 {function} — D{dims}",
-           xlabel="Cumulative Function Evaluations", ylabel="Fitness")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
+    return plot_distance_convergence(function, dims, means, evaluations, labels, figure_dir)
+
+
+def plot_distance_convergence(function, dims, means, evaluations, labels, figure_dir):
+    """Use the FULL convergence renderer with the saved scientific FE coordinates."""
+    import main as framework
+
+    curves = {str(label): curve for label, curve in zip(labels, means)}
     figure_dir = Path(figure_dir)
     figure_dir.mkdir(parents=True, exist_ok=True)
-    for suffix in ("png", "pdf"):
-        fig.savefig(figure_dir / f"{function}_D{dims}_distance_convergence.{suffix}", dpi=300)
-    plt.close(fig)
+    out_path = figure_dir / f"{function}_D{dims}_distance_convergence.png"
+    framework.plot_convergence(
+        curves, f"Convergence Curve - {function} (Log Scale)", out_path,
+        framework.build_optimizer_colors(labels), yscale="log",
+        show_markers=framework.CONVERGENCE_SHOW_MARKERS,
+        use_line_styles=framework.CONVERGENCE_USE_LINE_STYLES,
+        x_values=evaluations, x_label="Cumulative Function Evaluations",
+    )
+    print(f"DISTANCE FIGURE | {out_path} | PNG | {framework.FIGURE_EXPORT_DPI} DPI")
+    return out_path
 
 
 def export_distance_ablation(results, functions, args, paths):
@@ -125,12 +126,29 @@ def export_distance_ablation(results, functions, args, paths):
 
 
 def regenerate_from_checkpoints(args):
-    """Read only this mode's compatible caches; fail before any optimization."""
+    """Read saved curves/checkpoints and write only PNGs; never optimize/export data."""
     import main as framework
 
     args.resolved_gpu_batch_size = 1
     args.estimated_gpu_batch_capacity = 1
     paths = framework.make_paths(args, create=False)
+    functions = list(framework.ABLATION_FUNCTIONS)
+    archives = [Path(paths.res_dir) / f"{name}_D{args.dims}_convergence.npz"
+                for name in functions]
+    if all(archive.is_file() for archive in archives):
+        # Saved means and FE coordinates are authoritative for a style-only redraw.
+        # Preflight all eight before replacing any figure; no objective discovery.
+        expected_labels = [DISTANCE_LABELS[m] for m in framework.DISTANCE_ABLATION_METRICS]
+        for function, archive in zip(functions, archives):
+            with np.load(archive, allow_pickle=False) as data:
+                if (str(data["function"]) != function or int(data["dims"]) != args.dims
+                        or data["labels"].tolist() != expected_labels
+                        or data["mean_fitness"].shape != (5, data["function_evaluations"].size)):
+                    raise ValueError(f"Invalid distance convergence archive: {archive}")
+        for archive in archives:
+            plot_archive(archive, paths.fig_dir)
+        print(f"DISTANCE FIGURES ONLY COMPLETE | {len(archives)} PNGs | optimization runs=0")
+        return
     source_paths = None
     if args.reuse_cache_from_exp_id is not None:
         source_args = argparse.Namespace(**vars(args))
@@ -160,4 +178,12 @@ def regenerate_from_checkpoints(args):
                 "curves_runs": np.stack([o["curve"] for o in outputs]),
                 "fitness_runs": np.asarray([o["best_fitness"] for o in outputs]),
             }
-    export_distance_ablation(results, functions, args, paths)
+    # Checkpoint fallback remains read-only: do not rewrite scientific artifacts.
+    scalar_probe = int(args.compute_device == "cpu" and not framework.cpu_batching_enabled(args))
+    evaluations = (np.arange(1, args.epochs + 1) + 1) * args.pop_size + scalar_probe
+    labels = [DISTANCE_LABELS[m] for m in framework.DISTANCE_ABLATION_METRICS]
+    for function in functions:
+        means = np.stack([results[function][label]["curves_runs"].mean(axis=0)
+                          for label in labels])
+        plot_distance_convergence(function, args.dims, means, evaluations, labels, paths.fig_dir)
+    print(f"DISTANCE FIGURES ONLY COMPLETE | {len(functions)} PNGs | optimization runs=0")

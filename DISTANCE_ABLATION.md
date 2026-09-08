@@ -80,13 +80,17 @@ Existing cache files are neither deleted nor rewritten by this revision change.
 
 Each function produces:
 
-- A PNG and PDF convergence figure with five mean curves and sparse markers.
+- A 600-DPI PNG convergence figure with five mean curves and sparse markers
+  (no PDF companion export).
 - An NPZ archive containing per-run/mean raw fitness and error, final values,
   FE coordinates, labels, seeds, D, optimum and p.
 - Long-form per-run and mean convergence CSV files.
 
 The figures retain the existing project's **raw fitness including CEC bias**
-convention, using logarithmic scale for positive data and symlog otherwise.
+convention, using logarithmic scale. They reuse the FULL convergence renderer,
+categorical colors, typography, lines, markers, grid, and legend. Titles follow
+`Convergence Curve - F12017 (Log Scale)`. Shared `main.FIGURE_EXPORT_DPI = 600`
+controls export resolution; the x-axis remains `Cumulative Function Evaluations`.
 The FE axis counts the initial population plus each evaluated trial
 population. Scalar MEALPY additionally counts its one objective probe;
 objective verification/calibration evaluations are outside the scientific
@@ -108,9 +112,12 @@ python main.py --exp-id 7 --distance-ablation-figures-only
 # Equivalent flag: --distance-ablation-from-cache-only
 ```
 
-This path reads compatible checkpoints, writes the distance study's exports
-and figures, and never initializes CUDA or invokes optimization. Missing or
-incompatible runs cause an explicit error. An existing
+This path reads the saved NPZ means and FE coordinates and writes only the
+eight distance PNGs. CSV/NPZ data, statistics, checkpoints, and existing PDFs
+remain untouched. If the complete archive set is unavailable, it reads compatible
+checkpoints without rewriting scientific exports. It never initializes CUDA
+or invokes optimization. Missing or incompatible source data cause an explicit
+error. An existing
 `--reuse-cache-from-exp-id` can supply this mode's own compatible checkpoints
 read-only.
 

@@ -172,6 +172,7 @@ SENSITIVITY_PARAMETER_ATTRIBUTES = {
     "mahalanobis_q": "macro_mahal_q",
 }
 CHART_CMAP = "tab20"
+FIGURE_EXPORT_DPI = 600
 OPTIMIZER_COLOR_MAP = {
     "DE-M": "#ff7f0e",
     "DE-MC": "#2ca02c",
@@ -248,7 +249,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distance-ablation-from-cache-only", "--distance-ablation-figures-only",
         dest="distance_ablation_from_cache_only", action="store_true",
-        help="Regenerate distance-ablation data, summary and figures from complete caches; never optimize",
+        help="Regenerate distance-ablation PNG figures from saved curves or complete caches; never optimize or rewrite scientific data",
     )
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
@@ -2362,6 +2363,8 @@ def plot_convergence(
     yscale="linear",
     show_markers=False,
     use_line_styles=False,
+    x_values=None,
+    x_label="Iteration",
 ):
 
     fig, ax = plt.subplots(
@@ -2425,10 +2428,11 @@ def plot_convergence(
         )
         zorder = 3 if is_macro_de else 2
         linewidth = 2.5 if is_macro_de else 2.0
+        plot_coordinates = (plot_curve,) if x_values is None else (x_values, plot_curve)
 
         if is_macro_de:
             ax.plot(
-                plot_curve,
+                *plot_coordinates,
                 linewidth=4.0,
                 label="_nolegend_",
                 color="black",
@@ -2439,7 +2443,7 @@ def plot_convergence(
             )
 
         ax.plot(
-            plot_curve,
+            *plot_coordinates,
             linewidth=linewidth,
             label=display_optimizer_name(
                 optimizer_name
@@ -2458,7 +2462,7 @@ def plot_convergence(
     if yscale in ("log", "symlog"):
         ax.set_yscale(yscale)
 
-    ax.set_xlabel("Iteration")
+    ax.set_xlabel(x_label)
     ax.set_ylabel(
         "exp(Fitness)" if yscale == "exp" else "Fitness"
     )
@@ -2468,7 +2472,7 @@ def plot_convergence(
     fig.tight_layout()
     fig.savefig(
         out_path,
-        dpi=600,
+        dpi=FIGURE_EXPORT_DPI,
     )
 
     plt.close(fig)
@@ -2760,7 +2764,7 @@ def plot_sensitivity_grouped_convergence(
         paths.fig_dir,
         f"Sensitivity_grouped_{parameter}_Convergence.png",
     )
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
@@ -2828,7 +2832,7 @@ def plot_sensitivity_heatmap(
         paths.fig_dir,
         f"Sensitivity_summary_{parameter}_Heatmap.png",
     )
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
@@ -2916,7 +2920,7 @@ def plot_sensitivity_individual_convergence(
         paths.fig_dir,
         f"Sensitivity_{parameter}_{function_name}_Convergence.png",
     )
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
@@ -3124,7 +3128,7 @@ def plot_ablation_fitness_runtime_tradeoff(
             ))
             placed_boxes.append(selected_box)
 
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
@@ -3195,7 +3199,7 @@ def plot_ablation_runtime_comparison(
             )
     fig.suptitle("Ablation Runtime Comparison", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
@@ -3428,7 +3432,7 @@ def plot_overlap_diagnostic(
     difference_ax.legend()
     fig.suptitle(f"Cache signature: {cache_signature}", fontsize=9, y=0.995)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=600)
+    fig.savefig(out_path, dpi=FIGURE_EXPORT_DPI)
     plt.close(fig)
     return out_path
 
