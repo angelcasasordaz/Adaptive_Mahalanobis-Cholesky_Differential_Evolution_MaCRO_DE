@@ -35,6 +35,8 @@ def plot_distance_convergence(function, dims, means, evaluations, labels, figure
         show_markers=framework.CONVERGENCE_SHOW_MARKERS,
         use_line_styles=framework.CONVERGENCE_USE_LINE_STYLES,
         x_values=evaluations, x_label="Cumulative Function Evaluations",
+        # Selection emphasis is fixed across functions, independent of fitness rank.
+        highlighted_optimizer=DISTANCE_LABELS["mahalanobis_cholesky"],
     )
     print(f"DISTANCE FIGURE | {out_path} | PNG | {framework.FIGURE_EXPORT_DPI} DPI")
     return out_path

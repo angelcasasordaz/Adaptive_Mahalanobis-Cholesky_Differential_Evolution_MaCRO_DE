@@ -2365,6 +2365,7 @@ def plot_convergence(
     use_line_styles=False,
     x_values=None,
     x_label="Iteration",
+    highlighted_optimizer=None,
 ):
 
     fig, ax = plt.subplots(
@@ -2379,6 +2380,7 @@ def plot_convergence(
         is_macro_de = is_macro_de_optimizer(
             optimizer_name
         )
+        emphasized = is_macro_de or optimizer_name == highlighted_optimizer
 
         curve = np.asarray(
             curve,
@@ -2408,12 +2410,12 @@ def plot_convergence(
 
         color = (
             OPTIMIZER_COLOR_MAP["MaCRO-DE"]
-            if is_macro_de
+            if emphasized
             else optimizer_colors.get(optimizer_name, None)
         )
         linestyle = (
             "-"
-            if is_macro_de or not use_line_styles
+            if emphasized or not use_line_styles
             else LINE_STYLES[style_index % len(LINE_STYLES)]
         )
         marker = (
@@ -2426,11 +2428,11 @@ def plot_convergence(
             if marker is not None
             else None
         )
-        zorder = 3 if is_macro_de else 2
-        linewidth = 2.5 if is_macro_de else 2.0
+        zorder = 3 if emphasized else 2
+        linewidth = 2.5 if emphasized else 2.0
         plot_coordinates = (plot_curve,) if x_values is None else (x_values, plot_curve)
 
-        if is_macro_de:
+        if emphasized:
             ax.plot(
                 *plot_coordinates,
                 linewidth=4.0,
