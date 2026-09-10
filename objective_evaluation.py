@@ -33,6 +33,9 @@ def _evaluate_objective_chunk(task):
     if benchmark is None:
         module = importlib.import_module(spec.module)
         benchmark = getattr(module, spec.class_name)(ndim=spec.ndim)
+        if spec.module == "opfunu.cec_based.cec2017" and spec.class_name in {"F92017", "F212017"}:
+            from cec2017_corrections import corrected_benchmark
+            benchmark = corrected_benchmark(benchmark)
         _WORKER_BENCHMARKS[key] = benchmark
     values = np.empty(len(chunk), dtype=np.float64)
     for index, vector in enumerate(chunk):

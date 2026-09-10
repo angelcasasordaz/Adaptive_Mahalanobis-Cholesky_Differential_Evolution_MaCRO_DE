@@ -3,7 +3,8 @@
 Nothing in this module imports CuPy directly.  The caller supplies the active
 array module, keeping the Windows/CPU path independent of CUDA.  A candidate is
 usable only after its device result passes :func:`verify_gpu_objective` against
-the instantiated OPFUNU benchmark and its exact support data.
+the scalar benchmark and its exact OPFUNU support data. F9/F21 use the scoped
+corrected scalar classes; other functions retain the historical OPFUNU reference.
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
+
+from cec2017_corrections import OBJECTIVE_REVISIONS, assert_objective_lower_bound
 
 
 CEC_GPU_VERSION = "cec2017-complete-v3"
@@ -49,6 +52,7 @@ class CEC2017GpuObjective:
         self.shift = xp.asarray(self.shift_cpu, dtype=xp.float64)
         self.matrix_t = xp.asarray(self.matrix_cpu.T, dtype=xp.float64)
         self.bias = float(benchmark.f_bias)
+        self.f_global = float(benchmark.f_global)
         self.composition_shifts = xp.asarray(self.shift_cpu, dtype=xp.float64)
         self.composition_matrices_t = [
             xp.asarray(
@@ -142,14 +146,14 @@ class CEC2017GpuObjective:
             s * self.xp.sum((z - miu1) ** 2, axis=-1) + d * ndim,
         ) + 10.0 * (ndim - self.xp.sum(self.xp.cos(2.0 * self.xp.pi * delta), axis=-1))
 
-    def _schwefel(self, z):
+    def _schwefel(self, z, corrected=False):
         xp = self.xp
         ndim = z.shape[-1]
         z = z + 420.9687462275036
         high, low = z > 500.0, z < -500.0
         remainder = xp.fmod(xp.abs(z), 500.0)
         high_term = -(
-            (500.0 + remainder) * xp.sin(xp.sqrt(500.0 - remainder))
+            (500.0 - remainder if corrected else 500.0 + remainder) * xp.sin(xp.sqrt(500.0 - remainder))
             - ((z - 500.0) / 100.0) ** 2 / ndim
         )
         low_term = -(
@@ -305,21 +309,7 @@ class CEC2017GpuObjective:
             )
             value = first_last + middle
         elif name == "F92017":
-            z = self._rotate(x, 1000.0 / 100.0) + 420.9687462275036
-            high, low = z > 500.0, z < -500.0
-            high_mod = xp.fmod(xp.abs(z), 500.0)
-            low_mod = high_mod
-            high_term = -(
-                (500.0 + high_mod) * xp.sin(xp.sqrt(500.0 - high_mod))
-                - ((z - 500.0) / 100.0) ** 2 / self.ndim
-            )
-            low_term = -(
-                (-500.0 + low_mod) * xp.sin(xp.sqrt(500.0 - low_mod))
-                - ((z + 500.0) / 100.0) ** 2 / self.ndim
-            )
-            middle_term = -z * xp.sin(xp.sqrt(xp.abs(z)))
-            value = xp.sum(xp.where(high, high_term, xp.where(low, low_term, middle_term)), axis=-1)
-            value = value + 418.9828872724338 * self.ndim
+            value = self._schwefel(self._rotate(x, 10.0), corrected=True)
         elif name == "F102017":
             mz = self._rotate(x)
             value = self._hybrid(mz, (self._zakharov, lambda z: self._rosenbrock(z, 1.0), self._rastrigin))
@@ -358,9 +348,9 @@ class CEC2017GpuObjective:
             ))
         elif name == "F212017":
             value = self._composition(x, (
-                self._rastrigin(self._composition_rotate(x, 0)),
-                self._griewank(self._composition_rotate(x, 1)),
-                self._schwefel((x - self.composition_shifts[2]) * 10.0),
+                self._rastrigin(self._composition_rotate(x, 0, 5.12 / 100.0)),
+                self._griewank(self._composition_rotate(x, 1, 6.0)),
+                self._schwefel(self._composition_rotate(x, 2, 10.0), corrected=True),
             ))
         elif name == "F222017":
             value = self._composition(x, (
@@ -430,7 +420,11 @@ class CEC2017GpuObjective:
             value = self._composition(x, hybrid_values)
         else:  # pragma: no cover - constructor prevents this
             raise AssertionError(name)
-        return value + self.bias
+        result = value + self.bias
+        if name in OBJECTIVE_REVISIONS:
+            assert_objective_lower_bound(name, result, x, self.f_global,
+                                         backend=xp.__name__, xp=xp)
+        return result
 
 
 def verification_vectors(benchmark: Any, random_points: int = 512) -> np.ndarray:
@@ -458,6 +452,10 @@ def verify_gpu_objective(
     rtol: float = 5.0e-11,
     atol: float = 1.0e-7,
 ) -> GpuObjectiveVerification:
+    # Stock OPFUNU contains the defect being corrected. Only these two functions
+    # use a local scalar reference; raw upstream differences are audited separately.
+    from cec2017_corrections import corrected_benchmark
+    benchmark = corrected_benchmark(benchmark)
     points = verification_vectors(benchmark, random_points)
     reference = np.asarray([float(benchmark.evaluate(row)) for row in points], dtype=np.float64)
     device_points = objective.xp.asarray(points, dtype=objective.xp.float64)
@@ -479,7 +477,7 @@ def verify_gpu_objective(
         float(np.max(relative[finite_error], initial=0.0)),
         int(np.count_nonzero(~matches)),
         gpu_seconds,
-        "" if np.all(matches) else "strict finite OPFUNU comparison failed",
+        "" if np.all(matches) else "strict finite scalar CEC comparison failed",
     )
     objective.verification = report
     return report

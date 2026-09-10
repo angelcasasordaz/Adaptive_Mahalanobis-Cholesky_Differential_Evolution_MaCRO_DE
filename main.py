@@ -7,6 +7,7 @@ import logging
 import multiprocessing
 import os
 import pickle
+import re
 import time
 import glob
 import traceback
@@ -46,12 +47,13 @@ from mealpy_gpu_adapters import (
     supports_mealpy_gpu_adapter,
 )
 from objective_evaluation import ObjectiveSpec, initialize_objective_worker
+from cec2017_corrections import CORRECTED_CLASSES, objective_revision_metadata
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 8
-REUSE_CACHE_FROM_EXP_ID = 8
-COMPUTE_DEVICE = "gpu"
+EXP_ID = 9
+REUSE_CACHE_FROM_EXP_ID = 5
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -62,9 +64,9 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    # "full",
+    "full",
     # "ablation",
-    "distance_ablation",
+    # "distance_ablation",
     # "sensitivity",
 ]
 
@@ -133,6 +135,12 @@ ABLATION_OPTIMIZERS = [
     "DE-MC",
     "DE-MC-CF",
     "MaCRO-DE",
+]
+
+# None -> preserve the default FULL function selection (all discovered functions).
+FULL_FUNCTIONS = [
+    "F92017",
+    "F212017",
 ]
 
 # None -> run all discovered CEC functions in ablation mode.
@@ -249,7 +257,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distance-ablation-from-cache-only", "--distance-ablation-figures-only",
         dest="distance_ablation_from_cache_only", action="store_true",
-        help="Regenerate distance-ablation PNG figures from saved curves or complete caches; never optimize or rewrite scientific data",
+        help="Regenerate distance-ablation PNG figures and Statistical workbook from saved results; never optimize or rewrite scientific data",
     )
     cache_group = parser.add_mutually_exclusive_group()
     cache_group.add_argument(
@@ -524,6 +532,14 @@ def make_paths(args, create=True):
         cache_dir=cache_dir,
     )
 
+def cec_function_sort_key(name):
+    """Sort CEC names by function number, separating the optional suite year."""
+    match = re.fullmatch(r"F(\d+?)(?:(19\d{2}|20\d{2}))?", name)
+    if match is None:
+        return (1, 0, 0, name)
+    return (0, int(match.group(1)), int(match.group(2) or 0), name)
+
+
 def discover_benchmark_functions(
     benchmark_name,
     ndim,
@@ -567,8 +583,13 @@ def discover_benchmark_functions(
                 )
 
     function_map = dict(
-        sorted(function_map.items())
+        sorted(function_map.items(), key=lambda item: cec_function_sort_key(item[0]))
     )
+
+    if benchmark_name == "CEC2017":
+        for name, corrected_class in CORRECTED_CLASSES.items():
+            if name in function_map:
+                function_map[name] = corrected_class
 
     return function_map
 
@@ -828,7 +849,7 @@ def optimizer_scientific_parameters(optimizer_name, args):
     return parameters
 
 
-def build_cache_signature(args, optimizer_name):
+def build_cache_signature(args, optimizer_name, function_name=None):
     """Build an optimizer-local signature; the comparison list is reporting-only."""
     payload = {
         "benchmark": args.benchmark,
@@ -841,6 +862,7 @@ def build_cache_signature(args, optimizer_name):
             optimizer_name,
             args,
         ),
+        **objective_revision_metadata(args.benchmark, function_name),
     }
     return hashlib.sha1(
 
@@ -853,9 +875,21 @@ def build_cache_signature(args, optimizer_name):
 
 
 def select_experiment_functions(args, function_map):
+    # Reports and figures inherit this order; explicit mode lists retain theirs.
+    if args.experiment_mode == "full" and FULL_FUNCTIONS is not None:
+        requested = list(FULL_FUNCTIONS)
+        missing = [name for name in requested if name not in function_map]
+        if missing:
+            raise ValueError(
+                "Unknown full function(s): "
+                f"{', '.join(missing)}. Available functions: "
+                f"{', '.join(function_map)}"
+            )
+        return requested
+
     if args.experiment_mode == "ablation" and args.benchmark == "CEC2017":
         requested = (
-            list(function_map)
+            sorted(function_map, key=cec_function_sort_key)
             if ABLATION_FUNCTIONS is None
             else list(ABLATION_FUNCTIONS)
         )
@@ -886,8 +920,8 @@ def select_experiment_functions(args, function_map):
         return requested
 
     if args.functions == ["ALL"]:
-        return list(function_map)
-    return args.functions
+        return sorted(function_map, key=cec_function_sort_key)
+    return sorted(args.functions, key=cec_function_sort_key)
 
 def safe_path_component(value):
 
@@ -937,6 +971,7 @@ def checkpoint_metadata(
         "cache_signature": cache_signature,
         "benchmark": args.benchmark,
         "function_name": function_name,
+        **objective_revision_metadata(args.benchmark, function_name),
         "optimizer_name": optimizer_name,
         "optimizer_parameters": optimizer_scientific_parameters(
             optimizer_name,
@@ -1139,6 +1174,11 @@ def checkpoint_metadata_compatible(cached_metadata, expected_metadata):
     """Compare scientific run identity, including legacy checkpoint metadata."""
     if not isinstance(cached_metadata, dict):
         return False
+    revision = objective_revision_metadata(
+        expected_metadata.get("benchmark"), expected_metadata.get("function_name")
+    )
+    if any(cached_metadata.get(key) != value for key, value in revision.items()):
+        return False
     if any(
         cached_metadata.get(key) != expected_metadata.get(key)
         for key in SCIENTIFIC_RUN_KEYS
@@ -1285,6 +1325,9 @@ def load_compatible_cpu_checkpoint(
             with open(candidate_path, "rb") as file:
                 payload = pickle.load(file)
             metadata = payload.get("metadata", {})
+            revision = objective_revision_metadata(expected_metadata.get("benchmark"), function_name)
+            if any(metadata.get(key) != value for key, value in revision.items()):
+                continue
             if any(metadata.get(key) != expected_metadata.get(key) for key in scientific_keys):
                 continue
             output = payload.get("output")
@@ -2617,19 +2660,20 @@ def run_internal_convergence_from_cache(args):
         search_paths.append(make_paths(source_args, create=False))
     function_names = args.functions
     if function_names == ["ALL"]:
-        function_names = sorted({
+        function_names = {
             os.path.basename(path)
             for candidate in search_paths
             for path in glob.glob(os.path.join(candidate.cache_dir, "*", "F*"))
             if os.path.isdir(path)
-        })
+        }
+    function_names = sorted(function_names, key=cec_function_sort_key)
     colors = build_optimizer_colors(args.optimizers)
     written = []
     for function_name in function_names:
         curves = {}
         missing = []
         for optimizer_name in args.optimizers:
-            signature = build_cache_signature(args, optimizer_name)
+            signature = build_cache_signature(args, optimizer_name, function_name)
             run_curves = []
             for run in range(args.runs):
                 expected = {
@@ -3583,16 +3627,18 @@ def export_statistical_results(
     function_names,
     optimizer_order,
     out_path,
+    *,
+    precomputed_statistics=None,
 ):
     statistics = ["Best", "Worst", "Mean", "Std"]
     index = pd.MultiIndex.from_product(
-        [optimizer_order, statistics],
-        names=["Optimizer", "Statistic"],
+        [function_names, statistics],
+        names=["Function", "Statistic"],
     )
     fitness = pd.DataFrame(
         np.nan,
         index=index,
-        columns=pd.Index(function_names, name="CEC Function"),
+        columns=pd.Index(optimizer_order, name="Optimizer"),
         dtype=float,
     )
 
@@ -3600,12 +3646,16 @@ def export_statistical_results(
         optimizer_data = results_struct.get(function_name, {})
         for optimizer_name in optimizer_order:
             data = optimizer_data.get(optimizer_name, {})
-            stats = _final_fitness_stats(data.get("fitness_runs", []))
+            stats = (
+                _final_fitness_stats(data.get("fitness_runs", []))
+                if precomputed_statistics is None
+                else precomputed_statistics[function_name][optimizer_name]
+            )
             for statistic in statistics:
-                fitness.loc[(optimizer_name, statistic), function_name] = stats[statistic]
+                fitness.loc[(function_name, statistic), optimizer_name] = stats[statistic]
 
     with pd.ExcelWriter(out_path) as writer:
-        fitness.to_excel(writer, sheet_name="Fitness")
+        fitness.to_excel(writer, sheet_name="Fitness", merge_cells=True)
     return fitness
 
 
@@ -3888,7 +3938,7 @@ def audit_checkpoint_cache(args, paths, source_paths, selected_functions):
     for function_name in selected_functions:
         print(f"Function {function_name}")
         for optimizer_label, optimizer_name, optimizer_args in configurations:
-            signature = build_cache_signature(optimizer_args, optimizer_name)
+            signature = build_cache_signature(optimizer_args, optimizer_name, function_name)
             cached_count = 0
             for run in range(optimizer_args.runs):
                 seed = optimizer_args.seed_base + run
@@ -3950,8 +4000,8 @@ def run_experiment(args):
             "Strict GPU execution requires --cec-objective-backend auto or gpu; "
             "opfunu/numpy CPU objective routing is forbidden"
         )
-    # Cache inspection precedes worker pools, GPU initialization, objective
-    # verification, and every optimizer solve.
+    # Cache inspection precedes optimizer workers and solves. Corrected F9/F21
+    # additionally require their objective preflight before inspecting caches.
     args.resolved_gpu_batch_size = 1
     args.estimated_gpu_batch_capacity = 1
     paths = make_paths(args)
@@ -3968,6 +4018,12 @@ def run_experiment(args):
     )
     args.function_map = function_map
     selected_functions = select_experiment_functions(args, function_map)
+    corrected_functions = [name for name in selected_functions if name in CORRECTED_CLASSES]
+    if args.benchmark == "CEC2017" and corrected_functions:
+        # Fail before cache imports, calibrations, worker pools, or optimizer solves.
+        # This gate also applies to an ordinary --functions F92017 F212017 command.
+        from validate_cec2017_corrections import validate_corrections
+        validate_corrections(corrected_functions, args.dims, require_gpu=True)
     compatible_paths = audit_checkpoint_cache(
         args,
         paths,
@@ -4125,7 +4181,7 @@ def run_experiment(args):
             print("GPU objective verification: worker-local")
             print("CPU objective fallback     : FORBIDDEN")
         else:
-            verified_names = sorted(args.gpu_objectives)
+            verified_names = [name for name in selected_functions if name in args.gpu_objectives]
             fallback_names = [name for name in selected_functions if name not in args.gpu_objectives]
             print(
                 f"GPU objectives verified : {len(verified_names)}/{len(selected_functions)}"
@@ -4183,6 +4239,7 @@ def run_experiment(args):
             optimizer_cache_signature = build_cache_signature(
                 optimizer_args,
                 optimizer_name,
+                function_name,
             )
 
             try:

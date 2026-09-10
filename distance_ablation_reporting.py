@@ -107,6 +107,7 @@ def export_distance_ablation(results, functions, args, paths):
         plot_archive(archive, paths.fig_dir)
     table = pd.DataFrame(summary)
     table.to_csv(result_dir / "distance_ablation_summary.csv", index=False)
+    export_saved_statistical_results(paths, functions, args.dims)
     metadata = dict(
         benchmark=args.benchmark, functions=functions, function_list="main.ABLATION_FUNCTIONS",
         dims=args.dims, runs=args.runs, epochs=args.epochs, pop_size=args.pop_size,
@@ -127,8 +128,66 @@ def export_distance_ablation(results, functions, args, paths):
     print(f"Distance-ablation results: {paths.res_dir}\nFigures: {paths.fig_dir}")
 
 
+def export_saved_statistical_results(paths, functions, dims, *, final_errors=None):
+    """Render saved error statistics without rewriting their scientific sources."""
+    result_dir = Path(paths.res_dir)
+    metrics = ["chebyshev", "euclidean", "mahalanobis_cholesky", "manhattan", "minkowski"]
+    labels = [DISTANCE_LABELS[metric].removeprefix("MaCRO-DE/") for metric in metrics]
+    fields = {"Best": "best", "Worst": "worst", "Median": "median", "SD": "standard_deviation"}
+    summary_path = result_dir / "distance_ablation_summary.csv"
+    saved = {}
+    if summary_path.is_file():
+        summary = pd.read_csv(summary_path, float_precision="round_trip")
+        summary = summary.loc[summary["dimension"] == dims].set_index(["function", "metric"])
+        if not summary.index.is_unique:
+            raise ValueError(f"Duplicate function/metric rows in {summary_path}")
+        for function in functions:
+            saved[function] = {}
+            for metric, label in zip(metrics, labels):
+                row = summary.loc[(function, metric)]
+                saved[function][label] = {stat: float(row[field]) for stat, field in fields.items()}
+    else:
+        # Archives retain final errors; match the summary's population SD (ddof=0).
+        for function in functions:
+            archive = result_dir / f"{function}_D{dims}_convergence.npz"
+            if archive.is_file():
+                with np.load(archive, allow_pickle=False) as data:
+                    if str(data["function"]) != function or int(data["dims"]) != dims:
+                        raise ValueError(f"Invalid distance convergence archive: {archive}")
+                    archive_metrics = data["metrics"].tolist()
+                    errors = {metric: data["final_error"][archive_metrics.index(metric)]
+                              for metric in metrics}
+            elif final_errors is not None:
+                errors = final_errors[function]
+            else:
+                raise FileNotFoundError(f"Missing saved distance statistics: {archive}")
+            saved[function] = {}
+            for metric, label in zip(metrics, labels):
+                values = errors[metric]
+                saved[function][label] = {
+                    "Best": float(values.min()), "Worst": float(values.max()),
+                    "Median": float(np.median(values)), "SD": float(values.std()),
+                }
+    if not all(np.isfinite(value) for entries in saved.values()
+               for stats in entries.values() for value in stats.values()):
+        raise ValueError("Non-finite saved distance statistics")
+    out_path = result_dir / f"Statistical_Results_{paths.exp_tag}_Distance_Ablation.xlsx"
+    index = pd.MultiIndex.from_product(
+        [functions, list(fields)], names=["Function", "Statistic"],
+    )
+    table = pd.DataFrame(
+        [[saved[function][label][statistic] for label in labels]
+         for function, statistic in index],
+        index=index, columns=labels, dtype=float,
+    )
+    with pd.ExcelWriter(out_path) as writer:
+        table.to_excel(writer, sheet_name="Fitness", merge_cells=True)
+    print(f"Distance statistical results: {out_path}")
+    return out_path
+
+
 def regenerate_from_checkpoints(args):
-    """Read saved curves/checkpoints and write only PNGs; never optimize/export data."""
+    """Read saved data and regenerate PNGs and the Statistical workbook; never optimize."""
     import main as framework
 
     args.resolved_gpu_batch_size = 1
@@ -147,9 +206,10 @@ def regenerate_from_checkpoints(args):
                         or data["labels"].tolist() != expected_labels
                         or data["mean_fitness"].shape != (5, data["function_evaluations"].size)):
                     raise ValueError(f"Invalid distance convergence archive: {archive}")
+        export_saved_statistical_results(paths, functions, args.dims)
         for archive in archives:
             plot_archive(archive, paths.fig_dir)
-        print(f"DISTANCE FIGURES ONLY COMPLETE | {len(archives)} PNGs | optimization runs=0")
+        print(f"DISTANCE REPORTS COMPLETE | {len(archives)} PNGs + Statistical workbook | optimization runs=0")
         return
     source_paths = None
     if args.reuse_cache_from_exp_id is not None:
@@ -184,8 +244,18 @@ def regenerate_from_checkpoints(args):
     scalar_probe = int(args.compute_device == "cpu" and not framework.cpu_batching_enabled(args))
     evaluations = (np.arange(1, args.epochs + 1) + 1) * args.pop_size + scalar_probe
     labels = [DISTANCE_LABELS[m] for m in framework.DISTANCE_ABLATION_METRICS]
+    final_errors = None
+    if not (Path(paths.res_dir) / "distance_ablation_summary.csv").is_file():
+        final_errors = {}
+        for function in functions:
+            bias = float(args.function_map[function](ndim=args.dims).f_global)
+            final_errors[function] = {
+                metric: results[function][label]["fitness_runs"] - bias
+                for metric, label in zip(framework.DISTANCE_ABLATION_METRICS, labels)
+            }
+    export_saved_statistical_results(paths, functions, args.dims, final_errors=final_errors)
     for function in functions:
         means = np.stack([results[function][label]["curves_runs"].mean(axis=0)
                           for label in labels])
         plot_distance_convergence(function, args.dims, means, evaluations, labels, paths.fig_dir)
-    print(f"DISTANCE FIGURES ONLY COMPLETE | {len(functions)} PNGs | optimization runs=0")
+    print(f"DISTANCE REPORTS COMPLETE | {len(functions)} PNGs + Statistical workbook | optimization runs=0")
