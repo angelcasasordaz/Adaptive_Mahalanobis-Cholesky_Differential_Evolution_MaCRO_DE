@@ -64,7 +64,9 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
+    # "full",
     "ablation",
+    # "distance_ablation",
     "sensitivity",
 ]
 
@@ -95,7 +97,7 @@ SENSITIVITY_CONFIGS = [
 ]
 
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
-FULL_TEST_OPTIMIZER = "MaCRO-DE-t" # Aca tambien es para poner a correr nomas ese ps, pero como le hago pa saber que si nomas corre ese?
+FULL_TEST_OPTIMIZER = "MaCRO-DE-t-v2" # Aca tambien es para poner a correr nomas ese ps, pero como le hago pa saber que si nomas corre ese?
 
 AVAILABLE_BENCHMARKS = {
     "CEC2005": "opfunu.cec_based.cec2005",
