@@ -97,7 +97,7 @@ SENSITIVITY_CONFIGS = [
 ]
 
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
-FULL_TEST_OPTIMIZER = "MaCRO-DE-t-v2" # Aca tambien es para poner a correr nomas ese ps, pero como le hago pa saber que si nomas corre ese?
+FULL_TEST_OPTIMIZER = "MaCRO-DE-t-v2"
 
 AVAILABLE_BENCHMARKS = {
     "CEC2005": "opfunu.cec_based.cec2005",
@@ -119,8 +119,8 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     "MaCRO-DE",
-    "MaCRO-DE-t", # O sea este es el MaCRO-DE-t-v2?
-    "MaCRO-DE-t-v2", # O es este?
+    "MaCRO-DE-t",
+    "MaCRO-DE-t-v2",
     "BRO",
     "DBO",
     "DE",
