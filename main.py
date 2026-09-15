@@ -53,7 +53,7 @@ DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
 EXP_ID = 9
 REUSE_CACHE_FROM_EXP_ID = 5
-COMPUTE_DEVICE = "cpu"
+COMPUTE_DEVICE = "gpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -64,10 +64,8 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    "full",
-    # "ablation",
-    # "distance_ablation",
-    # "sensitivity",
+    "ablation",
+    "sensitivity",
 ]
 
 DISTANCE_ABLATION_METRICS = [
@@ -84,6 +82,11 @@ MACRO_BETA_MAX = 0.60
 MACRO_PCR = 0.10
 MACRO_MAHAL_Q = 0.50
 
+SENSITIVITY_OPTIMIZERS = [
+    "DE-MC-CF-v2",
+    # "MaCRO-DE",
+]
+
 SENSITIVITY_CONFIGS = [
     ("mahalanobis_q", [0.50, 0.68, 0.80, 0.90]),
     ("beta_min", [0.10, 0.20, 0.30, 0.40]),
@@ -92,7 +95,7 @@ SENSITIVITY_CONFIGS = [
 ]
 
 DE_MC_CF_IMPLEMENTATION_REVISION = "awad-close-far-v2"
-FULL_TEST_OPTIMIZER = "MaCRO-DE-t"
+FULL_TEST_OPTIMIZER = "MaCRO-DE-t" # Aca tambien es para poner a correr nomas ese ps, pero como le hago pa saber que si nomas corre ese?
 
 AVAILABLE_BENCHMARKS = {
     "CEC2005": "opfunu.cec_based.cec2005",
@@ -114,7 +117,8 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     "MaCRO-DE",
-    "MaCRO-DE-t",
+    "MaCRO-DE-t", # O sea este es el MaCRO-DE-t-v2?
+    "MaCRO-DE-t-v2", # O es este?
     "BRO",
     "DBO",
     "DE",
@@ -134,14 +138,16 @@ ABLATION_OPTIMIZERS = [
     "DE-M",
     "DE-MC",
     "DE-MC-CF",
+    "DE-MC-CF-v2",
     "MaCRO-DE",
 ]
 
 # None -> preserve the default FULL function selection (all discovered functions).
-FULL_FUNCTIONS = [
-    "F92017",
-    "F212017",
-]
+FULL_FUNCTIONS = None
+# FULL_FUNCTIONS = [
+#     "F92017",
+#     "F212017",
+# ]
 
 # None -> run all discovered CEC functions in ablation mode.
 #
@@ -236,6 +242,7 @@ class Paths:
     fig_dir: str
     res_dir: str
     cache_dir: str
+    sensitivity_optimizer: str = "MaCRO-DE"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -276,6 +283,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark", type=str, default="CEC2017", choices=list(AVAILABLE_BENCHMARKS.keys()), help="Benchmark suite")
     parser.add_argument("--functions", nargs="+", default=["ALL"], help="Functions to execute")
     parser.add_argument("--dims", type=int, default=30, help="Problem dimensions")
+    parser.add_argument("--sensitivity-optimizer", default=None,
+                        help="Override SENSITIVITY_OPTIMIZERS with one OFAT optimizer: "
+                             "MaCRO-DE, DE-MC-CF-v2 or MaCRO-DE-t-v2")
     parser.add_argument("--optimizers", nargs="+", default=None, help="List of optimizers")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -403,6 +413,22 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
+def selected_sensitivity_optimizers(args):
+    """Resolve the configured list, retaining the single-optimizer CLI override."""
+    override = getattr(args, "sensitivity_optimizer", None)
+    requested = [override] if override is not None else SENSITIVITY_OPTIMIZERS
+    if not requested:
+        raise ValueError("SENSITIVITY_OPTIMIZERS must contain at least one optimizer")
+    optimizers = []
+    for name in requested:
+        optimizer = resolve_optimizer_name(name)
+        if optimizer not in {"MaCRO-DE", "DE-MC-CF-v2"}:
+            raise ValueError("Sensitivity supports MaCRO-DE or DE-MC-CF-v2")
+        if optimizer not in optimizers:
+            optimizers.append(optimizer)
+    return optimizers
+
+
 def apply_experiment_mode(args, experiment_mode):
 
     args.experiment_mode = str(experiment_mode).lower()
@@ -433,7 +459,11 @@ def apply_experiment_mode(args, experiment_mode):
                 )
             if not values:
                 raise ValueError(f"Sensitivity group {parameter!r} has no values")
-        args.optimizers = ["MaCRO-DE"]
+        optimizers = selected_sensitivity_optimizers(args)
+        if len(optimizers) != 1:
+            raise ValueError("Expand sensitivity optimizers with experiment_configurations first")
+        args.sensitivity_optimizer = optimizers[0]
+        args.optimizers = [args.sensitivity_optimizer]
         args.sensitivity_configs = [
             (parameter, list(values)) for parameter, values in SENSITIVITY_CONFIGS
         ]
@@ -442,8 +472,12 @@ def apply_experiment_mode(args, experiment_mode):
         args.optimizers = list(DEFAULT_OPTIMIZERS)
 
 
-def sensitivity_optimizer_label(parameter, value):
-    return f"MaCRO-DE ({parameter}={value:g})"
+def sensitivity_optimizer_label(parameter, value, optimizer="MaCRO-DE"):
+    return f"{optimizer} ({parameter}={value:g})"
+
+
+def sensitivity_title_prefix(paths):
+    return "" if paths.sensitivity_optimizer == "MaCRO-DE" else f"{paths.sensitivity_optimizer} "
 
 
 def comparison_optimizer_order(args):
@@ -453,7 +487,7 @@ def comparison_optimizer_order(args):
     if args.experiment_mode != "sensitivity":
         return list(args.optimizers)
     return [
-        sensitivity_optimizer_label(parameter, value)
+        sensitivity_optimizer_label(parameter, value, getattr(args, "sensitivity_optimizer", "MaCRO-DE"))
         for parameter, values in args.sensitivity_configs
         for value in values
     ]
@@ -485,8 +519,8 @@ def optimizer_experiment_configurations(args):
             variant_args.sensitivity_parameter = parameter
             variant_args.sensitivity_value = float(value)
             yield (
-                sensitivity_optimizer_label(parameter, value),
-                "MaCRO-DE",
+                sensitivity_optimizer_label(parameter, value, getattr(args, "sensitivity_optimizer", "MaCRO-DE")),
+                getattr(args, "sensitivity_optimizer", "MaCRO-DE"),
                 variant_args,
             )
 
@@ -506,6 +540,11 @@ def make_paths(args, create=True):
         exp_tag,
         args.experiment_mode,
     )
+
+    sensitivity_optimizer = getattr(args, "sensitivity_optimizer", "MaCRO-DE")
+    if args.experiment_mode == "sensitivity" and sensitivity_optimizer == "DE-MC-CF-v2":
+        fig_dir = os.path.join(fig_dir, "DE-MC-CF-v2")
+        res_dir = os.path.join(res_dir, "DE-MC-CF-v2")
 
     cache_dir = os.path.join(
         res_dir,
@@ -530,6 +569,7 @@ def make_paths(args, create=True):
         fig_dir=fig_dir,
         res_dir=res_dir,
         cache_dir=cache_dir,
+        sensitivity_optimizer=sensitivity_optimizer,
     )
 
 def cec_function_sort_key(name):
@@ -832,6 +872,8 @@ def optimizer_scientific_parameters(optimizer_name, args):
         for key, value in init_kwargs.items()
         if key not in execution_only and key not in {"epoch", "pop_size"}
     }
+    if canonical_name == "DE-MC-CF-v2":
+        parameters["implementation_revision"] = optimizer_class.IMPLEMENTATION_REVISION
     if canonical_name == "DE-MC-CF":
         parameters["implementation_revision"] = DE_MC_CF_IMPLEMENTATION_REVISION
     if getattr(args, "experiment_mode", None) == "distance_ablation":
@@ -909,7 +951,11 @@ def select_experiment_functions(args, function_map):
             raise ValueError(f"Missing distance-ablation functions: {missing}")
         return requested
     if args.experiment_mode == "sensitivity":
-        requested = list(SENSITIVITY_FUNCTIONS)
+        requested = (
+            ["F12017", "F82017", "F152017", "F242017"]
+            if getattr(args, "sensitivity_optimizer", "MaCRO-DE") == "DE-MC-CF-v2"
+            else list(SENSITIVITY_FUNCTIONS)
+        )
         missing = [name for name in requested if name not in function_map]
         if missing:
             raise ValueError(
@@ -1005,6 +1051,10 @@ def checkpoint_metadata(
         "cec_objective_backend": args.cec_objective_backend,
         "cec_gpu_version": "cec2017-complete-v3",
         "cec_gpu_verification_points": args.cec_gpu_verification_points,
+        **(
+            {"optimizer_implementation_revision": "awad-close-far-beta-v2"}
+            if resolve_optimizer_name(optimizer_name) == "DE-MC-CF-v2" else {}
+        ),
         **(
             {"optimizer_implementation_revision": DE_MC_CF_IMPLEMENTATION_REVISION}
             if resolve_optimizer_name(optimizer_name) == "DE-MC-CF"
@@ -1186,6 +1236,9 @@ def checkpoint_metadata_compatible(cached_metadata, expected_metadata):
         return False
 
     expected_parameters = expected_metadata.get("optimizer_parameters", {})
+    if expected_parameters.get("implementation_revision") == "awad-close-far-beta-v2":
+        # V2 has no legacy caches. Never infer its scientific identity.
+        return cached_metadata.get("optimizer_parameters") == expected_parameters
     if "optimizer_parameters" in cached_metadata:
         return cached_metadata["optimizer_parameters"] == expected_parameters
 
@@ -2780,14 +2833,14 @@ def plot_sensitivity_grouped_convergence(
 
     for axis, function_name in zip(axes.reshape(-1), function_names):
         curves = {
-            sensitivity_optimizer_label(parameter, value): results_struct[
+            sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer): results_struct[
                 function_name
-            ][sensitivity_optimizer_label(parameter, value)]["curve"]
+            ][sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer)]["curve"]
             for value in values
         }
         scale = resolve_convergence_scale(curves, CONVERGENCE_SCALE)
         for value_index, value in enumerate(values):
-            label = sensitivity_optimizer_label(parameter, value)
+            label = sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer)
             _plot_sensitivity_curve(
                 axis,
                 curves[label],
@@ -2804,7 +2857,7 @@ def plot_sensitivity_grouped_convergence(
         axis.grid(alpha=0.3)
         axis.legend(title=parameter)
 
-    fig.suptitle(f"Sensitivity Convergence - {parameter}", fontsize=14)
+    fig.suptitle(f"{sensitivity_title_prefix(paths)}Sensitivity Convergence - {parameter}", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out_path = os.path.join(
         paths.fig_dir,
@@ -2828,7 +2881,7 @@ def plot_sensitivity_heatmap(
             np.mean(
                 np.asarray(
                     results_struct[function_name][
-                        sensitivity_optimizer_label(parameter, value)
+                        sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer)
                     ]["fitness_runs"],
                     dtype=float,
                 )
@@ -2857,7 +2910,7 @@ def plot_sensitivity_heatmap(
     )
     axis.set_xlabel("CEC Function")
     axis.set_ylabel("Parameter value")
-    axis.set_title(f"Sensitivity Summary - {parameter}")
+    axis.set_title(f"{sensitivity_title_prefix(paths)}Sensitivity Summary - {parameter}")
 
     for row in range(means.shape[0]):
         for column in range(means.shape[1]):
@@ -2934,9 +2987,9 @@ def plot_sensitivity_individual_convergence(
 ):
     """Plot one parameter's four existing mean curves for one CEC function."""
     curves = {
-        sensitivity_optimizer_label(parameter, value): results_struct[
+        sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer): results_struct[
             function_name
-        ][sensitivity_optimizer_label(parameter, value)]["curve"]
+        ][sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer)]["curve"]
         for value in values
     }
     scale = resolve_convergence_scale(curves, CONVERGENCE_SCALE)
@@ -2944,7 +2997,7 @@ def plot_sensitivity_individual_convergence(
     fig, axis = plt.subplots(figsize=(10, 5), facecolor="white")
 
     for value_index, value in enumerate(values):
-        label = sensitivity_optimizer_label(parameter, value)
+        label = sensitivity_optimizer_label(parameter, value, paths.sensitivity_optimizer)
         _plot_sensitivity_curve(
             axis,
             curves[label],
@@ -2957,7 +3010,7 @@ def plot_sensitivity_individual_convergence(
         axis.set_yscale(scale)
     axis.set_xlabel("Iteration")
     axis.set_ylabel("exp(Fitness)" if scale == "exp" else "Fitness")
-    axis.set_title(f"Sensitivity Convergence - {parameter} - {function_name}")
+    axis.set_title(f"{sensitivity_title_prefix(paths)}Sensitivity Convergence - {parameter} - {function_name}")
     axis.grid(alpha=0.3)
     axis.legend()
     fig.tight_layout()
@@ -4823,6 +4876,14 @@ def run_experiment(args):
 def experiment_configurations(args):
 
     for experiment_mode in args.experiment_modes:
+        if str(experiment_mode).lower() == "sensitivity":
+            # Keep each optimizer's existing caches, function selection and plots.
+            for optimizer in selected_sensitivity_optimizers(args):
+                mode_args = argparse.Namespace(**vars(args))
+                mode_args.sensitivity_optimizer = optimizer
+                apply_experiment_mode(mode_args, experiment_mode)
+                yield mode_args
+            continue
         mode_args = argparse.Namespace(**vars(args))
         apply_experiment_mode(mode_args, experiment_mode)
         yield mode_args

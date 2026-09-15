@@ -21,7 +21,7 @@ from objective_evaluation import ObjectiveEvaluator, ObjectiveSpec
 
 
 BATCH_ENGINE_VERSION = "independent-runs-v4-parallel-plans"
-BATCHED_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE"})
+BATCHED_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE", "DE-MC-CF-v2"})
 _OBJECTIVE_DECISION_CACHE: dict[tuple, tuple[str, dict[str, float]]] = {}
 
 
@@ -200,7 +200,7 @@ class BatchedDEEngine:
         self.pop_size = int(pop_size)
         self.backend = ComputeBackend(compute_device)
         self.xp = self.backend.xp
-        self._device_macro = self.backend.uses_gpu and optimizer_name in {"MaCRO-DE", "DE-MC-CF"}
+        self._device_macro = self.backend.uses_gpu and optimizer_name in {"MaCRO-DE", "DE-MC-CF", "DE-MC-CF-v2"}
         self.lb_backend = self.backend.asarray(self.lb)
         self.ub_backend = self.backend.asarray(self.ub)
         self.wf = float(wf)
@@ -469,7 +469,7 @@ class BatchedDEEngine:
         )
         if state.capture_trace:
             state.trace["initial_population"] = initial_cpu.copy()
-        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE"}:
+        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE", "DE-MC-CF-v2"}:
             div0 = self._awad(positions)
             state.algorithm_state.update(
                 div_max_seen=self.xp.maximum(div0, 1.0e-9),
@@ -485,6 +485,9 @@ class BatchedDEEngine:
             )
         if self._device_macro:
             from macro_gpu_random import MacroRandomPlan
+            if self.optimizer_name == "DE-MC-CF-v2":
+                from de_mc_cf_v2_gpu_random import CFV2RandomPlan
+                MacroRandomPlan = CFV2RandomPlan
             state.algorithm_state["device_random_plan"] = MacroRandomPlan(
                 self.xp, state.generators, self.pop_size, self.n_dims
             )
@@ -717,10 +720,17 @@ class BatchedDEEngine:
                     close, state.algorithm_state["div_norm_for_update"], self
                 ),
             )
-            factors = f_vectors if self.optimizer_name == "MaCRO-DE" else self.wf
+            factors = f_vectors if self.optimizer_name in {"MaCRO-DE", "DE-MC-CF-v2"} else self.wf
             mutants = self._stage(
                 "mutation", lambda: self._gather_mutants(state.positions, donors, factors)
             )
+        elif self.optimizer_name == "DE-MC-CF-v2":
+            from de_mc_cf_v2_plans import random_plan
+            started = perf_counter()
+            donors, crossover, f_vectors, pcr_values = random_plan(self, state, close, far)
+            self.timing.add("donor_construction", perf_counter() - started)
+            mutants = self._stage("mutation", lambda: self._gather_mutants(
+                state.positions, donors, self._device_plan_buffer("f_vectors", f_vectors)))
         elif self.optimizer_name == "MaCRO-DE":
             started = perf_counter()
             donors, crossover, f_vectors, pcr_values = self._macro_random_plan(state, close, far)
@@ -778,7 +788,7 @@ class BatchedDEEngine:
         self._stage("history_store", store_history)
         state.epoch_counts += 1
 
-        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE"}:
+        if self.optimizer_name in {"DE-MC-CF", "MaCRO-DE", "DE-MC-CF-v2"}:
             algo = state.algorithm_state
             div_awad = self._stage("awad", lambda: self._awad(state.positions))
             algo["div_max_seen"] = self.xp.maximum(algo["div_max_seen"], div_awad)
@@ -818,7 +828,7 @@ class BatchedDEEngine:
                 first_generation_fitness=self.backend.to_cpu(state.fitness),
                 first_generation_best=self.backend.to_cpu(state.best_fitness),
             )
-            if self.optimizer_name == "MaCRO-DE":
+            if self.optimizer_name in {"MaCRO-DE", "DE-MC-CF-v2"}:
                 state.trace["f_vectors"] = self.backend.to_cpu(f_vectors).copy()
                 state.trace["pcr_values"] = self.backend.to_cpu(pcr_values).copy()
         self.timing.epochs += 1

@@ -1,18 +1,50 @@
 # Virtual environment
 .venv/
 .venv311/
+venv/
+env/
 
 # Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+cache/
+caches/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # PyCharm
 .idea/
+.vscode/
+*.iml
 
 # Experiment outputs
 Results/
 Figures/
 Methodology_Graphics/
+smoke_out/
+
+# Build and packaging outputs
+build/
+dist/
+*.egg-info/
+
+# Temporary files and logs
+tmp/
+temp/
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store

@@ -12,6 +12,7 @@ from de_diversity_selection_optimizer import DE_DiversitySelection
 from de_mahalanobis_optimizer import DE_Mahalanobis
 from de_m_optimizer import DE_M
 from de_mc_cf_optimizer import DE_MC_CF
+from de_mc_cf_v2_optimizer import DE_MC_CF_V2
 from de_mc_optimizer import DE_MC
 from dsade_awad_optimizer import DSADE_AWAD
 from dsade_optimizer import DSADE
@@ -36,11 +37,15 @@ CUSTOM_OPTIMIZER_CLASSES = {
     "DE-M": DE_M,
     "DE-MC": DE_MC,
     "DE-MC-CF": DE_MC_CF,
+    "DE-MC-CF-v2": DE_MC_CF_V2,
 }
 CUSTOM_OPTIMIZERS = tuple(CUSTOM_OPTIMIZER_CLASSES)
-GPU_BATCHED_CUSTOM_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE"})
+GPU_BATCHED_CUSTOM_OPTIMIZERS = frozenset({"DE-M", "DE-MC", "DE-MC-CF", "MaCRO-DE", "DE-MC-CF-v2"})
 
 CUSTOM_OPTIMIZER_ALIASES = {
+    "DE-MC-CF-v2": "DE-MC-CF-v2",
+    "DE_MC_CF_V2": "DE-MC-CF-v2",
+    "MaCRO-DE-t-v2": "DE-MC-CF-v2",
     "MACRO-DE-T": "DE-MC-CF",
     "MACRO-DE": "MaCRO-DE",
     "MACRO_DE": "MaCRO-DE",
