@@ -119,7 +119,7 @@ DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
     #"DSADE",
     # "MaCRO-DE",
-    "MaCRO-DE-t",
+    # "MaCRO-DE-t",
     "MaCRO-DE-t-v2",
     "BRO",
     "DBO",
