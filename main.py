@@ -51,9 +51,9 @@ from cec2017_corrections import CORRECTED_CLASSES, objective_revision_metadata
 
 DEFAULT_EPOCHS = 2000
 DEFAULT_RUNS = 30
-EXP_ID = 9
-REUSE_CACHE_FROM_EXP_ID = 5
-COMPUTE_DEVICE = "gpu"
+EXP_ID = 10
+REUSE_CACHE_FROM_EXP_ID = 9
+COMPUTE_DEVICE = "cpu"
 # Options:
 # "cpu"
 # "hybrid"
@@ -64,10 +64,10 @@ GPU_MEMORY_FRACTION = 0.85
 GPU_BATCH_SIZE = "auto"
 REUSE_CACHE = True
 EXPERIMENT_MODES = [
-    # "full",
-    "ablation",
+    "full",
+    # "ablation",
     # "distance_ablation",
-    "sensitivity",
+    # "sensitivity",
 ]
 
 DISTANCE_ABLATION_METRICS = [
@@ -79,10 +79,16 @@ DISTANCE_ABLATION_METRICS = [
 ]
 DISTANCE_ABLATION_MINKOWSKI_P = 3.0
 
+# Estos eran para la version MaCRO-DE-t QUE NO USABA ADAPTATIVOS
+# MACRO_BETA_MIN = 0.10
+# MACRO_BETA_MAX = 0.60
+# MACRO_PCR = 0.10
+# MACRO_MAHAL_Q = 0.50
+
 MACRO_BETA_MIN = 0.10
 MACRO_BETA_MAX = 0.60
-MACRO_PCR = 0.10
-MACRO_MAHAL_Q = 0.50
+MACRO_PCR = 0.20
+MACRO_MAHAL_Q = 0.68
 
 SENSITIVITY_OPTIMIZERS = [
     "DE-MC-CF-v2",
@@ -117,23 +123,23 @@ AVAILABLE_BENCHMARKS = {
 
 DEFAULT_BENCHMARK = "CEC2017"
 DEFAULT_OPTIMIZERS = [
-    #"DSADE",
-    # "MaCRO-DE",
-    # "MaCRO-DE-t",
+    "DSADE",
+    "MaCRO-DE",
+    "MaCRO-DE-t",
     "MaCRO-DE-t-v2",
-    "BRO",
-    "DBO",
-    "DE",
-    "DMOA",
-    "GWO",
-    "HHO",
-    "MFO",
-    "MGO",
-    "PSO",
-    "SHADE",
-    "WOA",
-    "JADE",
-    "FLA",
+    # "BRO",
+    # "DBO",
+    # "DE",
+    # "DMOA",
+    # "GWO",
+    # "HHO",
+    # "MFO",
+    # "MGO",
+    # "PSO",
+    # "SHADE",
+    # "WOA",
+    # "JADE",
+    # "FLA",
 ]
 ABLATION_OPTIMIZERS = [
     "DE",
@@ -468,6 +474,7 @@ def apply_experiment_mode(args, experiment_mode):
         args.optimizers = [args.sensitivity_optimizer]
         args.sensitivity_configs = [
             (parameter, list(values)) for parameter, values in SENSITIVITY_CONFIGS
+            if args.sensitivity_optimizer != "DE-MC-CF-v2" or parameter != "pcr"
         ]
         args.sensitivity_value = None
     elif args.optimizers is None:
@@ -1054,7 +1061,7 @@ def checkpoint_metadata(
         "cec_gpu_version": "cec2017-complete-v3",
         "cec_gpu_verification_points": args.cec_gpu_verification_points,
         **(
-            {"optimizer_implementation_revision": "awad-close-far-beta-v2"}
+            {"optimizer_implementation_revision": resolve_optimizer_class(optimizer_name).IMPLEMENTATION_REVISION}
             if resolve_optimizer_name(optimizer_name) == "DE-MC-CF-v2" else {}
         ),
         **(
@@ -1238,7 +1245,7 @@ def checkpoint_metadata_compatible(cached_metadata, expected_metadata):
         return False
 
     expected_parameters = expected_metadata.get("optimizer_parameters", {})
-    if expected_parameters.get("implementation_revision") == "awad-close-far-beta-v2":
+    if expected_parameters.get("implementation_revision") == resolve_optimizer_class("DE-MC-CF-v2").IMPLEMENTATION_REVISION:
         # V2 has no legacy caches. Never infer its scientific identity.
         return cached_metadata.get("optimizer_parameters") == expected_parameters
     if "optimizer_parameters" in cached_metadata:

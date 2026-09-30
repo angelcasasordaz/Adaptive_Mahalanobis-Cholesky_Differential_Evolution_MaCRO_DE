@@ -4,6 +4,11 @@ SeedSequence initialization stays in NumPy, once per run. CUDA retains the
 128-bit PCG state and the cached upper uint32 across every epoch. Sampling uses
 NumPy 2.2's Floyd/32-bit Lemire/shuffle order, including rejection draws.
 No fast math or fused multiply-add: uniform/scale rounding must match NumPy.
+F uses independent U(beta_min, beta_max) draws per coordinate, multiplied by
+clip(1.5 - D, 0.5, 1.5) and clipped to [0.1, 1.5]. D is MaCRO-DE's delayed
+normalized diversity state supplied in div, rather than per-target dM.
+Historical adaptive F used one U[0, 1) scalar times (0.60 + (1 - dM)).
+pcr is 0.1 + 0.25 * (1 - dM). AWAD only routes the threshold-defined pools.
 """
 import numpy as np
 
@@ -70,10 +75,9 @@ extern "C" __global__ void fmean(const double *f, double *out, int runs, int siz
     if(r<runs) out[r]=pairwise(f+r*size,size)/size;
 }
 extern "C" __global__ void plan(
-    U *states, const bool *close, const double *div, long long *donors,
+    U *states, const bool *close, const double *div, const double *dm, long long *donors,
     bool *cross, double *f, double *pcr_out, int *pools,
-    int runs, int pop, int dims, int macro, double beta_min,
-    double beta_max, double pcr, double cr) {
+    int runs, int pop, int dims, int macro, double beta_min, double beta_max) {
     int r=blockIdx.x * blockDim.x + threadIdx.x;
     if (r>=runs) return;
     U *s=states+r*6;
@@ -83,10 +87,11 @@ extern "C" __global__ void plan(
     for (int i=0; i<pop; ++i)
         if (close[r*pop+i]==choose_close) pool[count++]=i;
     if (macro && count<3) { count=pop; for(int i=0;i<pop;++i) pool[i]=i; }
-    double pc=pcr;
-    double scale=clip(0.5+(1.0-div[r]),0.5,1.5);
-    pcr_out[r]=pc;
+    double D=clip(div[r],0.0,1.0);
+    double scale=clip(1.5-D,0.5,1.5);
     for (int i=0; i<pop; ++i) {
+        double pc=0.1+0.25*(1.0-dm[r*pop+i]);
+        pcr_out[r*pop+i]=pc;
         int excluded=-1;
         if (!macro) for(int j=0;j<count;++j) if(pool[j]==i) excluded=j;
         int size=count-(excluded>=0), selected[3];
@@ -99,7 +104,7 @@ extern "C" __global__ void plan(
         }
         int base=(r*pop+i)*dims;
         for(int d=0;d<dims;++d)
-            f[base+d]=beta_min+(beta_max-beta_min)*rng.uniform();
+            f[base+d]=clip((beta_min+(beta_max-beta_min)*rng.uniform())*scale,0.1,1.5);
         int j0=rng.bounded(dims-1);
         for(int d=0;d<dims;++d) cross[base+d]=rng.uniform()<=pc;
         cross[base+j0]=true;
@@ -127,7 +132,7 @@ class CFV2RandomPlan:
         self.donors = cp.empty((self.runs, pop_size, 3), dtype=cp.int64)
         self.cross = cp.empty((self.runs, pop_size, n_dims), dtype=cp.bool_)
         self.f = cp.empty(self.cross.shape, dtype=cp.float64)
-        self.pcr = cp.empty(self.runs, dtype=cp.float64)
+        self.pcr = cp.empty((self.runs, pop_size), dtype=cp.float64)
         self.pools = cp.empty((self.runs, pop_size), dtype=cp.int32)
         self.kernel = cp.RawKernel(_SOURCE, 'plan', options=('--fmad=false',))
         self.mean_kernel = cp.RawKernel(_SOURCE, 'fmean', options=('--fmad=false',))
@@ -138,12 +143,11 @@ class CFV2RandomPlan:
             self.f, self.fmean, np.int32(self.runs), np.int32(self.pop*self.dims)))
         return self.fmean
 
-    def generate(self, close, div, engine):
+    def generate(self, close, div, engine, dM):
         self.kernel(((self.runs + 31)//32,), (32,), (
-            self.states, close, div, self.donors, self.cross, self.f, self.pcr, self.pools,
+            self.states, close, div, dM, self.donors, self.cross, self.f, self.pcr, self.pools,
             np.int32(self.runs), np.int32(self.pop), np.int32(self.dims),
-            np.int32(0), np.float64(engine.beta_min),
-            np.float64(engine.beta_max), np.float64(engine.pcr), np.float64(engine.cr)))
+            np.int32(0), np.float64(engine.beta_min), np.float64(engine.beta_max)))
         return self.donors, self.cross, self.f, self.pcr
 
     def export_states(self, generators):

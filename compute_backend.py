@@ -341,6 +341,16 @@ class ComputeBackend:
         factor, factor_kind = self.covariance_factor(sigma, method)
         return self.distances_from_factor(pop, factor, factor_kind)
 
+    def normalized_mahalanobis(self, dist2):
+        """Per-target dM: distance / generation maximum, independently per run.
+
+        A collapsed population has dM=0. Group thresholding uses raw dist2.
+        """
+        xp = self.xp
+        distance = xp.sqrt(xp.maximum(self.asarray(dist2), 0.0))
+        maximum = xp.max(distance, axis=-1, keepdims=True)
+        return distance / xp.where(maximum > 0.0, maximum, 1.0)
+
     def mahalanobis_cpu(self, population, n_dims: int, method: str = "cholesky"):
         sigma, chol, dist2 = self.mahalanobis(population, n_dims, method)
         return (

@@ -711,13 +711,15 @@ class BatchedDEEngine:
         else:
             method = "cholesky_solve" if self.optimizer_name == "DE-MC" else "cholesky"
             threshold = self.macro_threshold if self.optimizer_name == "MaCRO-DE" else self.threshold
-        close, far, _ = self._classification(state.positions, method, threshold)
+        close, far, dist2 = self._classification(state.positions, method, threshold)
+        dM = self.backend.normalized_mahalanobis(dist2) if self.optimizer_name == "DE-MC-CF-v2" else None
 
         if self._device_macro:
             donors, crossover, f_vectors, pcr_values = self._stage(
                 "random_plan_gpu",
                 lambda: state.algorithm_state["device_random_plan"].generate(
-                    close, state.algorithm_state["div_norm_for_update"], self
+                    close, state.algorithm_state["div_norm_for_update"], self,
+                    *([dM] if self.optimizer_name == "DE-MC-CF-v2" else [])
                 ),
             )
             factors = f_vectors if self.optimizer_name in {"MaCRO-DE", "DE-MC-CF-v2"} else self.wf
@@ -727,7 +729,8 @@ class BatchedDEEngine:
         elif self.optimizer_name == "DE-MC-CF-v2":
             from de_mc_cf_v2_plans import random_plan
             started = perf_counter()
-            donors, crossover, f_vectors, pcr_values = random_plan(self, state, close, far)
+            donors, crossover, f_vectors, pcr_values = random_plan(
+                self, state, close, far, self.backend.to_cpu(dM))
             self.timing.add("donor_construction", perf_counter() - started)
             mutants = self._stage("mutation", lambda: self._gather_mutants(
                 state.positions, donors, self._device_plan_buffer("f_vectors", f_vectors)))
@@ -831,6 +834,8 @@ class BatchedDEEngine:
             if self.optimizer_name in {"MaCRO-DE", "DE-MC-CF-v2"}:
                 state.trace["f_vectors"] = self.backend.to_cpu(f_vectors).copy()
                 state.trace["pcr_values"] = self.backend.to_cpu(pcr_values).copy()
+                if dM is not None:
+                    state.trace["dM"] = self.backend.to_cpu(dM).copy()
         self.timing.epochs += 1
         if self._device_macro:
             self._flush_gpu_events(ready_only=True)
